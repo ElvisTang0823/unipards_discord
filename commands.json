@@ -1,0 +1,44 @@
+{
+  "commands": [
+    {
+      "name": "!ping",
+      "usage": "!ping",
+      "description": "測試 Bot 目前的延遲。"
+    },
+    {
+      "name": "/info",
+      "usage": "/info",
+      "description": "僅限在 1556259986278195280 頻道查看目前可用的指令。"
+    },
+    {
+      "name": "/create-channel",
+      "usage": "/create-channel <頻道類型> [頻道名稱]",
+      "description": "在建頻入口建立私聊群或活動討論群；僅限指定入口頻道。"
+    },
+    {
+      "name": "!allow",
+      "usage": "!allow <成員|身分組|everyone>",
+      "description": "頻道建立者允許指定成員或身分組存取此自動建立頻道。"
+    },
+    {
+      "name": "!deny",
+      "usage": "!deny <成員|身分組|everyone>",
+      "description": "頻道建立者拒絕指定成員或身分組存取此自動建立頻道。"
+    },
+    {
+      "name": "!reset",
+      "usage": "!reset <成員|身分組|everyone>",
+      "description": "頻道建立者重設指定對象的頻道權限覆寫。"
+    },
+    {
+      "name": "!list",
+      "usage": "!list",
+      "description": "列出目前自動建立頻道明確允許及拒絕（例如使用 !deny）的成員、身分組與權限。"
+    },
+    {
+      "name": "!close",
+      "usage": "!close",
+      "description": "頻道建立者封存活動討論群，或刪除臨時群組與個人語音頻道。"
+    }
+  ]
+}
