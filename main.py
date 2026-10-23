@@ -64,6 +64,16 @@ class DiscordBot(commands.Bot):
 
     async def on_ready(self) -> None:
         logger.info("Logged in as %s (ID: %s)", self.user, self.user.id)
+        try:
+            await self.change_presence(
+                activity=discord.Activity(
+                    type=discord.ActivityType.playing,
+                    name="FRC6998團隊的24小時助理機器人",
+                )
+            )
+        except discord.HTTPException:
+            logger.exception("Unable to update bot activity presence")
+
         if self._legacy_guild_info_cleanup_complete:
             return
 

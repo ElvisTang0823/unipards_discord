@@ -52,6 +52,7 @@
 啟動時會自動載入 `cogs/` 內的 Cog，並在 `database/bot.sqlite3` 建立資料庫、`bot_settings` 與 `channel_owners` 資料表。
 Slash Command 會在啟動時同步至 Discord；新增或修改指令後，請同步更新 `commands.json`。
 `/info` 僅能在頻道 `1556259986278195280` 使用。啟動時會移除同名的舊伺服器範圍 `/info` 指令，避免它和全域指令同時出現。
+Bot 上線後會顯示「正在玩 FRC6998團隊的24小時助理機器人」活動狀態。
 
 建頻功能依賴設定好的 Discord 分類與入口頻道 ID。Bot 需在相關分類／頻道擁有管理頻道權限；自動語音頻道另需移動成員權限。`!allow`、`!deny`、`!reset` 會設定頻道權限覆寫，Bot 需有管理身分組權限。前綴指令依賴 Message Content Intent。
 
