@@ -1,17 +1,21 @@
 import asyncio
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial, wraps
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Concatenate, ParamSpec, TypeVar, cast
 
 import pgembed
+from pgembed import _commands as pgembed_commands
 import psycopg
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
 P = ParamSpec("P")
 R = TypeVar("R")
+PGEMBED_START_TIMEOUT_SECONDS = 120
+PGEMBED_START_LOCK = threading.Lock()
 
 
 class Database:
@@ -312,7 +316,36 @@ def _start_embedded_postgres(
     data_directory: Path,
 ) -> pgembed.PostgresServer:
     data_directory.parent.mkdir(parents=True, exist_ok=True)
-    server = pgembed.get_server(data_directory, cleanup_mode="stop")
+    try:
+        original_pg_ctl = pgembed_commands.pg_ctl
+    except AttributeError as error:
+        raise RuntimeError(
+            "pgembed is missing pg_ctl.exe; reinstall pgembed in this Python environment"
+        ) from error
+
+    def pg_ctl_with_separate_log(
+        arguments: list[str],
+        **kwargs: Any,
+    ) -> str:
+        command_arguments = list(arguments)
+        if "-l" in command_arguments:
+            log_argument = command_arguments.index("-l") + 1
+            if log_argument >= len(command_arguments):
+                raise ValueError("pg_ctl -l requires a log file path")
+            command_arguments[log_argument] = str(
+                data_directory / "pgembed-server.log"
+            )
+        command_kwargs = dict(kwargs)
+        command_kwargs["timeout"] = PGEMBED_START_TIMEOUT_SECONDS
+        return original_pg_ctl(command_arguments, **command_kwargs)
+
+    # Keep pg_ctl's output separate from PostgreSQL's recovery log path.
+    with PGEMBED_START_LOCK:
+        pgembed_commands.pg_ctl = pg_ctl_with_separate_log
+        try:
+            server = pgembed.get_server(data_directory, cleanup_mode="stop")
+        finally:
+            pgembed_commands.pg_ctl = original_pg_ctl
     return server.__enter__()
 
 
