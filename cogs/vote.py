@@ -4,8 +4,9 @@ import asyncio
 import json
 import logging
 import re
-import sqlite3
+import psycopg
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import discord
 from discord import app_commands
@@ -14,6 +15,7 @@ from discord.ext import commands
 from cogs._text import normalize_multiline_text
 from cogs._pagination import format_event_footer, notify_event_creator
 from database import (
+    Database,
     begin_vote_poll_close,
     complete_vote_poll,
     create_vote_poll,
@@ -126,12 +128,12 @@ class VoteSelectionView(discord.ui.View):
             selected_indices = [
                 int(value) for value in self.option_select.values
             ]
-            result = self.cog.save_selection(
+            result = await self.cog.save_selection(
                 self.poll_id,
                 interaction.user.id,
                 selected_indices,
             )
-        except (sqlite3.Error, RuntimeError, TypeError, ValueError):
+        except (psycopg.Error, RuntimeError, TypeError, ValueError):
             logger.exception("Unable to save vote selection for poll %s", self.poll_id)
             await interaction.response.edit_message(
                 content="目前無法記錄你的投票，請稍後再試。",
@@ -156,14 +158,14 @@ class Vote(commands.Cog):
         self.close_tasks: dict[int, asyncio.Task[None]] = {}
 
     @property
-    def database(self) -> sqlite3.Connection:
+    def database(self) -> Database:
         connection = getattr(self.bot, "database", None)
-        if not isinstance(connection, sqlite3.Connection):
-            raise RuntimeError("SQLite 尚未初始化")
+        if not isinstance(connection, Database):
+            raise RuntimeError("PostgreSQL 尚未初始化")
         return connection
 
     async def cog_load(self) -> None:
-        for row in get_open_vote_polls(self.database):
+        for row in await get_open_vote_polls(self.database):
             poll_id = int(row["id"])
             message_id = row["message_id"]
             try:
@@ -182,7 +184,7 @@ class Vote(commands.Cog):
                     "Removing incomplete vote poll %s with no published message",
                     poll_id,
                 )
-                delete_vote_poll(self.database, poll_id)
+                await delete_vote_poll(self.database, poll_id)
                 continue
 
             if row["status"] == "open":
@@ -235,7 +237,7 @@ class Vote(commands.Cog):
 
             try:
                 await self.publish_results(poll_id)
-            except (discord.HTTPException, sqlite3.Error, RuntimeError, TypeError):
+            except (discord.HTTPException, psycopg.Error, RuntimeError, TypeError):
                 logger.exception(
                     "Unable to publish results for vote poll %s; retrying",
                     poll_id,
@@ -245,12 +247,12 @@ class Vote(commands.Cog):
             return
 
     async def publish_results(self, poll_id: int) -> None:
-        poll = begin_vote_poll_close(self.database, poll_id)
+        poll = await begin_vote_poll_close(self.database, poll_id)
         if poll is None:
             return
 
         options = json.loads(poll["options_json"])
-        counts, voter_count, ballot_count = get_vote_results(
+        counts, voter_count, ballot_count = await get_vote_results(
             self.database,
             poll_id,
         )
@@ -331,7 +333,7 @@ class Vote(commands.Cog):
         else:
             announcement_published = True
 
-        complete_vote_poll(
+        await complete_vote_poll(
             self.database,
             poll_id,
             int(message_id),
@@ -355,7 +357,7 @@ class Vote(commands.Cog):
 
     def get_poll_webhook(
         self,
-        poll: sqlite3.Row,
+        poll: dict[str, Any],
     ) -> discord.Webhook | None:
         webhook_id = poll["webhook_id"]
         webhook_token = poll["webhook_token"]
@@ -374,8 +376,8 @@ class Vote(commands.Cog):
         webhook: discord.Webhook | None,
     ) -> None:
         try:
-            delete_vote_poll(self.database, poll_id)
-        except sqlite3.Error:
+            await delete_vote_poll(self.database, poll_id)
+        except psycopg.Error:
             logger.exception("Unable to remove incomplete vote poll %s", poll_id)
 
         if webhook is None:
@@ -407,13 +409,13 @@ class Vote(commands.Cog):
             return channel
         raise TypeError(f"Channel {channel_id} is not a text channel or thread")
 
-    def save_selection(
+    async def save_selection(
         self,
         poll_id: int,
         voter_id: int,
         selected_indices: list[int],
     ) -> str:
-        poll = get_vote_poll(self.database, poll_id)
+        poll = await get_vote_poll(self.database, poll_id)
         if (
             poll is None
             or poll["status"] != "open"
@@ -421,7 +423,7 @@ class Vote(commands.Cog):
             <= datetime.now(timezone.utc)
         ):
             return "closed"
-        return replace_vote_selection(
+        return await replace_vote_selection(
             self.database,
             poll_id,
             voter_id,
@@ -441,7 +443,7 @@ class Vote(commands.Cog):
             return
 
         try:
-            poll = get_vote_poll(self.database, poll_id)
+            poll = await get_vote_poll(self.database, poll_id)
             if (
                 poll is None
                 or poll["status"] != "open"
@@ -457,12 +459,12 @@ class Vote(commands.Cog):
                 return
 
             options = json.loads(poll["options_json"])
-            selected_indices = get_vote_selection(
+            selected_indices = await get_vote_selection(
                 self.database,
                 poll_id,
                 interaction.user.id,
             )
-        except (sqlite3.Error, RuntimeError, TypeError, ValueError):
+        except (psycopg.Error, RuntimeError, TypeError, ValueError):
             logger.exception("Unable to load vote selection for poll %s", poll_id)
             await interaction.response.send_message(
                 "目前無法讀取投票資料，請稍後再試。",
@@ -597,7 +599,7 @@ class Vote(commands.Cog):
             interaction.user.avatar or interaction.user.default_avatar
         ).url
         try:
-            poll_id = create_vote_poll(
+            poll_id = await create_vote_poll(
                 self.database,
                 interaction.guild_id,
                 interaction.channel_id,
@@ -611,7 +613,7 @@ class Vote(commands.Cog):
                 utc_deadline.isoformat(),
                 datetime.now(timezone.utc).isoformat(),
             )
-        except (sqlite3.Error, RuntimeError):
+        except (psycopg.Error, RuntimeError):
             logger.exception("Unable to create vote poll")
             await interaction.followup.send(
                 "建立投票失敗，請稍後再試。",
@@ -668,7 +670,7 @@ class Vote(commands.Cog):
             )
             if webhook.token is None:
                 raise RuntimeError("Discord did not return a webhook token")
-            set_vote_poll_webhook(
+            await set_vote_poll_webhook(
                 self.database,
                 poll_id,
                 webhook.id,
@@ -686,7 +688,7 @@ class Vote(commands.Cog):
                 embed=embed,
                 **send_kwargs,
             )
-            set_vote_poll_message(
+            await set_vote_poll_message(
                 self.database,
                 poll_id,
                 poll_message.id,
@@ -704,7 +706,7 @@ class Vote(commands.Cog):
                 ephemeral=True,
             )
             return
-        except (discord.HTTPException, sqlite3.Error, RuntimeError, TypeError):
+        except (discord.HTTPException, psycopg.Error, RuntimeError, TypeError):
             logger.exception("Unable to publish vote poll %s", poll_id)
             await self.cleanup_incomplete_poll(poll_id, poll_message, webhook)
             await interaction.followup.send(

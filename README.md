@@ -1,11 +1,12 @@
 # Unipards Discord Bot
 
-以 Python 建立的 Discord Bot 起始專案。指令功能放在 `cogs/`，資料儲存使用 Python 內建的 SQLite。
+以 Python 建立的 Discord Bot 起始專案。指令功能放在 `cogs/`，使用 `pgembed` 在專案內啟動 PostgreSQL 17，資料目錄位於 `data/postgres/`。
 
 ## 環境需求
 
-- Python 3.10 或更新版本
+- Python 3.12 或更新版本（需有 `pgembed` 對應作業系統／架構的套件 wheel）
 - Discord Bot Token
+- 不需預先安裝 PostgreSQL Server 或建立資料庫
 
 ## 安裝與啟動
 
@@ -27,6 +28,10 @@
    ```env
    DISCORD_TOKEN=你的BotToken
    ```
+
+   `pip install -r requirements.txt` 會安裝 Psycopg 用戶端與 `pgembed` PostgreSQL Server。Bot 啟動時會在專案內的 `data/postgres/` 初始化資料庫及 schema；不需要 `DATABASE_URL`、外部服務或手動設定連接埠。原 SQLite 資料庫已備份到 `data/backups/bot.sqlite3`，不會匯入新資料庫。
+
+   `data/` 已加入 `.gitignore`，包含 PostgreSQL 資料與舊資料備份，不會隨原始碼提交。打包或複製資料前請先完整停止 Bot；PostgreSQL 原生資料目錄只能在相容作業系統／架構及相同 PostgreSQL 主要版本間直接搬移，跨平台需用 `pg_dump`／還原。線上託管只有在主機提供持久化磁碟，且支援該平台的 `pgembed` wheel 時才適合此模式；暫存磁碟可能在重新部署時清空資料。
 
 4. 在 Discord Developer Portal 的 Bot 設定中啟用 **Message Content Intent**，並邀請 Bot 加入伺服器。
 
@@ -72,16 +77,17 @@ py main.py
 
 加入指定語音入口頻道（`1556272392458735668`）會自動建立個人語音頻道並將成員移入；頻道空置後會自動刪除。自動建頻的建立者資料存放於 `channel_owners` 資料表。
 
-啟動時會自動載入 `cogs/` 內的 Cog，並在 `database/bot.sqlite3` 建立資料庫、`bot_settings`、`channel_owners`、`vote_polls`、`vote_ballots`、`signup_events`、`signup_members`、`order_events` 與 `order_participants` 資料表。
+啟動時會自動載入 `cogs/` 內的 Cog，並在專案內的 PostgreSQL 資料庫建立 `bot_settings`、`channel_owners`、`vote_polls`、`vote_ballots`、`signup_events`、`signup_members`、`order_events`、`order_participants` 與 `command_rate_limits` 資料表。
+每位使用者（跨伺服器）的非建立指令共用「任一滾動 1 秒最多 2 次」限流；`/create-channel`、`/create-vote`、`/create-signup`、`/create-order` 共用每小時一次限流，且不另設伺服器活動上限。限制在 PostgreSQL 中原子記錄，可跨 Bot 重啟及多個 Bot 程序生效。資料庫操作使用最多 4 個背景工作者及有界佇列；佇列滿載時會拒絕新資料庫工作，不會無限制累積。此限制只約束指令執行，不限制按鈕、選單、表單、反應事件或到達 Discord／主機的網路流量，也不能取代 Discord 或主機商的 DDoS 防護。
 Slash Command 會在啟動時同步至 Discord；新增或修改指令後，請同步更新 `commands.json`。
 啟動時會重新同步目前載入的全域斜線指令定義，令 Discord 端與程式保持一致；並移除每個已加入伺服器內與目前全域指令同名的伺服器專屬指令，避免舊版本遮蔽新版。未載入的全域舊指令會由全域同步移除。
 Bot 上線後會顯示「正在玩 FRC6998團隊的24小時助理機器人」活動狀態。
 
 建頻功能依賴設定好的 Discord 分類與入口頻道 ID。Bot 需在相關分類／頻道擁有管理頻道權限；自動語音頻道另需移動成員權限。`!allow`、`!deny`、`!reset` 會設定頻道權限覆寫，Bot 需有管理身分組權限。前綴指令依賴 Message Content Intent。
 
-`/create-vote` 需要 Bot 在投票頻道具有「管理 Webhook」權限，以投票發起者的伺服器暱稱與 Discord 頭貼建立投票卡，並在截止時編輯原卡公布結果。每個投票會建立專用 Webhook，投票結束後會刪除；Webhook 憑證僅在投票開放期間保存在 SQLite，並於完成後清除。
+`/create-vote` 需要 Bot 在投票頻道具有「管理 Webhook」權限，以投票發起者的伺服器暱稱與 Discord 頭貼建立投票卡，並在截止時編輯原卡公布結果。每個投票會建立專用 Webhook，投票結束後會刪除；Webhook 憑證僅在投票開放期間保存在 PostgreSQL，並於完成後清除。
 
-`/create-signup` 需要 Bot 在活動頻道具有「管理 Webhook」、「檢視頻道」、「傳送訊息」、「嵌入連結」、「新增反應」及「讀取訊息歷史」權限；若在討論串建立活動，也需能在討論串傳送訊息。報名卡片及公告會以建立者的伺服器暱稱與 Discord 頭貼發送。截止時會重新讀取 ✅ 反應以確認最終名單，並在活動結束後清除 Webhook 憑證。報名資料保存在 `signup_events` 與 `signup_members` 資料表；既有資料庫會自動新增截止提醒訊息 ID 欄位以支援公告重試。
+`/create-signup` 需要 Bot 在活動頻道具有「管理 Webhook」、「檢視頻道」、「傳送訊息」、「嵌入連結」、「新增反應」及「讀取訊息歷史」權限；若在討論串建立活動，也需能在討論串傳送訊息。報名卡片及公告會以建立者的伺服器暱稱與 Discord 頭貼發送。截止時會重新讀取 ✅ 反應以確認最終名單，並在活動結束後清除 Webhook 憑證。報名資料保存在 PostgreSQL 的 `signup_events` 與 `signup_members` 資料表。
 
 `/create-order` 需要 Bot 在揪團頻道具有「管理 Webhook」、「檢視頻道」及「傳送訊息」權限；若在討論串建立，也需能在討論串傳送訊息。菜單圖片可選填，但必須有圖片或非空白說明文字（可多行），未提供兩者時不會建立。截止時會直接編輯原揪團卡：Embed 說明文字先列揪團說明，再接續以 `<@成員>` 和 `└ 品項` 列出明細；一般訊息內容只提及發起者。名單多頁時可從卡片按鈕各自開啟私人分頁。揪團資料保存在 `order_events` 與 `order_participants` 資料表，Webhook 憑證於完成後清除。
 

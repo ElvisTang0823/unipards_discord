@@ -1,12 +1,13 @@
+import asyncio
 import logging
-import sqlite3
+import psycopg
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from cogs.channel_permissions import send_permission_guide
-from database import load_channel_owners, save_channel_owners
+from database import Database, load_channel_owners, save_channel_owners
 
 
 ENTRY_CHANNEL_ID = 1556259986278195280
@@ -30,35 +31,36 @@ class TemporaryGroups(commands.Cog):
         self.bot = bot
         self.managed_channels: dict[int, int] = {}
         self.ownership_ready = False
-        self.load_ownership()
+        self.ownership_save_lock = asyncio.Lock()
 
-    def load_ownership(self) -> None:
+    async def cog_load(self) -> None:
         try:
             if self.bot.database is None:
-                raise RuntimeError("SQLite 尚未初始化")
-            self.managed_channels = load_channel_owners(
+                raise RuntimeError("PostgreSQL 尚未初始化")
+            self.managed_channels = await load_channel_owners(
                 self.bot.database,
                 "generated",
             )
-        except (sqlite3.Error, RuntimeError, TypeError, ValueError):
+        except (psycopg.Error, RuntimeError, TypeError, ValueError):
             logger.exception("Unable to load generated channel ownership")
             self.ownership_ready = False
             return
         self.ownership_ready = True
 
-    def save_ownership(self) -> bool:
-        try:
-            if self.bot.database is None:
-                raise RuntimeError("SQLite 尚未初始化")
-            save_channel_owners(
-                self.bot.database,
-                "generated",
-                self.managed_channels,
-            )
-        except (sqlite3.Error, RuntimeError, TypeError, ValueError):
-            logger.exception("Unable to save generated channel ownership")
-            return False
-        return True
+    async def save_ownership(self) -> bool:
+        async with self.ownership_save_lock:
+            try:
+                if self.bot.database is None:
+                    raise RuntimeError("PostgreSQL 尚未初始化")
+                await save_channel_owners(
+                    self.bot.database,
+                    "generated",
+                    dict(self.managed_channels),
+                )
+            except (psycopg.Error, RuntimeError, TypeError, ValueError):
+                logger.exception("Unable to save generated channel ownership")
+                return False
+            return True
 
     @app_commands.command(
         name="create-channel",
@@ -154,7 +156,7 @@ class TemporaryGroups(commands.Cog):
             return
 
         self.managed_channels[channel.id] = interaction.user.id
-        if not self.save_ownership():
+        if not await self.save_ownership():
             try:
                 await channel.delete(reason="無法保存臨時頻道建立者資料")
             except (discord.Forbidden, discord.HTTPException):
@@ -179,7 +181,7 @@ class TemporaryGroups(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
         owner_id = self.managed_channels.pop(channel.id, None)
-        if owner_id is not None and not self.save_ownership():
+        if owner_id is not None and not await self.save_ownership():
             self.managed_channels[channel.id] = owner_id
 
 

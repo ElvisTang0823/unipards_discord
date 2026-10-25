@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-import sqlite3
+import psycopg
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import discord
 from discord import app_commands
@@ -20,6 +20,7 @@ from cogs._pagination import (
     notify_event_creator,
 )
 from database import (
+    Database,
     complete_order_event,
     create_order_event,
     delete_order_event,
@@ -82,7 +83,7 @@ class OrderItemsModal(discord.ui.Modal, title="登記揪團品項"):
             if line.strip()
         )
         try:
-            saved = save_order_items(
+            saved = await save_order_items(
                 self.cog.database,
                 self.event_id,
                 interaction.user.id,
@@ -90,7 +91,7 @@ class OrderItemsModal(discord.ui.Modal, title="登記揪團品項"):
                 items,
                 datetime.now(timezone.utc).isoformat(),
             )
-        except sqlite3.Error:
+        except psycopg.Error:
             logger.exception("Unable to save order items for event %s", self.event_id)
             await interaction.response.send_message(
                 "目前無法保存品項，請稍後再試。",
@@ -130,7 +131,7 @@ class OrderPanelView(discord.ui.View):
         self.add_item(button)
 
     async def open_items(self, interaction: discord.Interaction) -> None:
-        event = get_order_event(self.cog.database, self.event_id)
+        event = await get_order_event(self.cog.database, self.event_id)
         if (
             event is None
             or event["status"] != "open"
@@ -145,7 +146,7 @@ class OrderPanelView(discord.ui.View):
         participant = next(
             (
                 row
-                for row in self.cog.get_participants(self.event_id)
+                for row in await self.cog.get_participants(self.event_id)
                 if int(row["user_id"]) == interaction.user.id
             ),
             None,
@@ -164,15 +165,15 @@ class Order(commands.Cog):
         self.bot = bot
 
     @property
-    def database(self) -> sqlite3.Connection:
+    def database(self) -> Database:
         connection = getattr(self.bot, "database", None)
-        if not isinstance(connection, sqlite3.Connection):
-            raise RuntimeError("SQLite 尚未初始化")
+        if not isinstance(connection, Database):
+            raise RuntimeError("PostgreSQL 尚未初始化")
         return connection
 
     async def cog_load(self) -> None:
         self.bot.add_dynamic_items(PersistentPageButton)
-        for event in get_open_order_events(self.database):
+        for event in await get_open_order_events(self.database):
             if event["panel_message_id"] is not None:
                 self.bot.add_view(
                     OrderPanelView(
@@ -190,28 +191,28 @@ class Order(commands.Cog):
     @tasks.loop(seconds=10)
     async def process_deadlines(self) -> None:
         now = datetime.now(timezone.utc)
-        for event in get_open_order_events(self.database):
+        for event in await get_open_order_events(self.database):
             event_id = int(event["id"])
             try:
                 if (
                     event["status"] == "open"
                     and datetime.fromisoformat(event["deadline_at"]) <= now
                 ):
-                    if not set_order_event_status(
+                    if not await set_order_event_status(
                         self.database,
                         event_id,
                         "announcing",
                         expected_status="open",
                     ):
                         continue
-                    event = get_order_event(self.database, event_id)
+                    event = await get_order_event(self.database, event_id)
                     if event is None:
                         continue
                 if event["status"] == "announcing":
                     await self.publish_announcement(event)
             except (
                 discord.HTTPException,
-                sqlite3.Error,
+                psycopg.Error,
                 RuntimeError,
                 TypeError,
                 ValueError,
@@ -222,8 +223,8 @@ class Order(commands.Cog):
     async def before_process_deadlines(self) -> None:
         await self.bot.wait_until_ready()
 
-    def get_participants(self, event_id: int) -> list[sqlite3.Row]:
-        return get_order_participants(self.database, event_id)
+    async def get_participants(self, event_id: int) -> list[dict[str, Any]]:
+        return await get_order_participants(self.database, event_id)
 
     async def get_channel(
         self,
@@ -236,7 +237,7 @@ class Order(commands.Cog):
             raise TypeError(f"Channel {channel_id} is not a text channel or thread")
         return channel
 
-    async def get_event_webhook(self, event: sqlite3.Row) -> discord.Webhook:
+    async def get_event_webhook(self, event: dict[str, Any]) -> discord.Webhook:
         webhook_id = event["webhook_id"]
         webhook_token = event["webhook_token"]
         if webhook_id is None or webhook_token is None:
@@ -325,7 +326,7 @@ class Order(commands.Cog):
         creator_name = interaction.user.display_name
         creator_avatar_url = interaction.user.display_avatar.url
         try:
-            event_id = create_order_event(
+            event_id = await create_order_event(
                 self.database,
                 interaction.guild.id,
                 interaction.channel_id,
@@ -338,7 +339,7 @@ class Order(commands.Cog):
                 deadline_utc.isoformat(),
                 datetime.now(timezone.utc).isoformat(),
             )
-        except (sqlite3.Error, RuntimeError):
+        except (psycopg.Error, RuntimeError):
             logger.exception("Unable to create order event")
             await interaction.followup.send(
                 "建立揪團失敗，請稍後再試。",
@@ -359,7 +360,7 @@ class Order(commands.Cog):
             )
             if webhook.token is None:
                 raise RuntimeError("Discord did not return a webhook token")
-            set_order_event_webhook(
+            await set_order_event_webhook(
                 self.database,
                 event_id,
                 webhook.id,
@@ -383,11 +384,11 @@ class Order(commands.Cog):
             if isinstance(channel, discord.Thread):
                 kwargs["thread"] = channel
             panel_message = await webhook.send(**kwargs)
-            set_order_event_message(self.database, event_id, panel_message.id)
+            await set_order_event_message(self.database, event_id, panel_message.id)
         except (
             discord.Forbidden,
             discord.HTTPException,
-            sqlite3.Error,
+            psycopg.Error,
             RuntimeError,
             TypeError,
         ):
@@ -447,8 +448,8 @@ class Order(commands.Cog):
         webhook: discord.Webhook | None,
     ) -> None:
         try:
-            delete_order_event(self.database, event_id)
-        except sqlite3.Error:
+            await delete_order_event(self.database, event_id)
+        except psycopg.Error:
             logger.exception("Unable to delete incomplete order event %s", event_id)
         if webhook is None:
             return
@@ -462,10 +463,12 @@ class Order(commands.Cog):
         except discord.HTTPException:
             logger.exception("Unable to delete incomplete order webhook %s", event_id)
 
-    async def publish_announcement(self, event: sqlite3.Row) -> None:
+    async def publish_announcement(self, event: dict[str, Any]) -> None:
         event_id = int(event["id"])
         participants = [
-            row for row in self.get_participants(event_id) if str(row["items"]).strip()
+            row
+            for row in await self.get_participants(event_id)
+            if str(row["items"]).strip()
         ]
         pages = self.create_announcement_pages(event, participants)
         webhook = await self.get_event_webhook(event)
@@ -507,12 +510,12 @@ class Order(commands.Cog):
             )
         else:
             announcement_published = True
-            set_order_announcement_message_ids(
+            await set_order_announcement_message_ids(
                 self.database,
                 event_id,
                 json.dumps([int(message_id)]),
             )
-        complete_order_event(self.database, event_id)
+        await complete_order_event(self.database, event_id)
         if announcement_published:
             await notify_event_creator(
                 self.bot,
@@ -531,8 +534,8 @@ class Order(commands.Cog):
 
     @staticmethod
     def create_announcement_pages(
-        event: sqlite3.Row,
-        participants: Sequence[sqlite3.Row],
+        event: dict[str, Any],
+        participants: Sequence[dict[str, Any]],
     ) -> list[PaginationPage]:
         title = f"揪團結果｜{event['title']}"
         description = str(event["description"]).strip()
@@ -637,12 +640,12 @@ class Order(commands.Cog):
             )
         return result_pages
 
-    def create_announcement_embeds_for_event(
+    async def create_announcement_embeds_for_event(
         self,
         event_id: int,
         guild_id: int | None,
     ) -> list[PaginationPage]:
-        event = get_order_event(self.database, event_id)
+        event = await get_order_event(self.database, event_id)
         if (
             event is None
             or event["status"] != "closed"
@@ -651,7 +654,7 @@ class Order(commands.Cog):
             return []
         participants = [
             row
-            for row in self.get_participants(event_id)
+            for row in await self.get_participants(event_id)
             if str(row["items"]).strip()
         ]
         return self.create_announcement_pages(event, participants)

@@ -1,10 +1,10 @@
 import logging
-import sqlite3
+import psycopg
 
 import discord
 from discord.ext import commands
 
-from database import load_all_channel_owners
+from database import Database, load_all_channel_owners
 
 
 DESTINATION_CATEGORY_ID = 1556268544277225533
@@ -115,7 +115,7 @@ class ChannelPermissions(commands.Cog):
             return False
         return True
 
-    def restore_owner_tracking(
+    async def restore_owner_tracking(
         self,
         channel: discord.TextChannel | discord.VoiceChannel,
         owner_cog: commands.Cog,
@@ -123,10 +123,10 @@ class ChannelPermissions(commands.Cog):
     ):
         managed_channels = getattr(owner_cog, "managed_channels")
         managed_channels[channel.id] = owner_id
-        if owner_cog.save_ownership() is False:
+        if await owner_cog.save_ownership() is False:
             logger.error("Unable to restore ownership tracking for channel %s", channel.id)
 
-    def stop_tracking(
+    async def stop_tracking(
         self, channel: discord.TextChannel | discord.VoiceChannel
     ) -> tuple[commands.Cog, int] | None:
         cog_name = "TempVoice" if isinstance(channel, discord.VoiceChannel) else "TemporaryGroups"
@@ -139,18 +139,18 @@ class ChannelPermissions(commands.Cog):
         owner_id = managed_channels.pop(channel.id, None)
         if owner_id is None:
             return None
-        if save_ownership() is False:
+        if await save_ownership() is False:
             managed_channels[channel.id] = owner_id
-            save_ownership()
+            await save_ownership()
             return None
         return owner_cog, owner_id
 
-    def load_owners(self) -> dict[int, int] | None:
+    async def load_owners(self) -> dict[int, int] | None:
         try:
             if self.bot.database is None:
-                raise RuntimeError("SQLite 尚未初始化")
-            return load_all_channel_owners(self.bot.database)
-        except (sqlite3.Error, RuntimeError):
+                raise RuntimeError("PostgreSQL 尚未初始化")
+            return await load_all_channel_owners(self.bot.database)
+        except (psycopg.Error, RuntimeError):
             logger.exception("Unable to load channel ownership")
             return None
 
@@ -164,7 +164,7 @@ class ChannelPermissions(commands.Cog):
             await ctx.send("請在自己建立的文字或語音頻道內使用此指令。")
             return None
 
-        owners = self.load_owners()
+        owners = await self.load_owners()
         if owners is None:
             await ctx.send("無法讀取頻道建立者資料，請通知管理員。")
             return None
@@ -440,7 +440,7 @@ class ChannelPermissions(commands.Cog):
             await ctx.send("Bot 在此頻道需要「管理頻道」權限才能刪除。")
             return
 
-        tracking = self.stop_tracking(channel)
+        tracking = await self.stop_tracking(channel)
         if tracking is None:
             await ctx.send("無法解除此頻道的自動追蹤，沒有執行封存或刪除。")
             return
@@ -474,12 +474,12 @@ class ChannelPermissions(commands.Cog):
                 )
             except discord.Forbidden as error:
                 print(f"無法封存活動專案群 {channel.id}：{error}")
-                self.restore_owner_tracking(channel, owner_cog, owner_id)
+                await self.restore_owner_tracking(channel, owner_cog, owner_id)
                 await ctx.send("封存失敗，已恢復頻道追蹤。請檢查 Bot 的頻道權限。")
                 return
             except discord.HTTPException as error:
                 print(f"Discord 無法封存活動專案群 {channel.id}：{error}")
-                self.restore_owner_tracking(channel, owner_cog, owner_id)
+                await self.restore_owner_tracking(channel, owner_cog, owner_id)
                 await ctx.send("Discord 暫時無法封存頻道，已恢復頻道追蹤。")
                 return
 
@@ -494,11 +494,11 @@ class ChannelPermissions(commands.Cog):
             await channel.delete(reason=f"{ctx.author} 使用 !close 刪除自動生成頻道")
         except discord.Forbidden as error:
             print(f"無法刪除自動生成頻道 {channel.id}：{error}")
-            self.restore_owner_tracking(channel, owner_cog, owner_id)
+            await self.restore_owner_tracking(channel, owner_cog, owner_id)
             await ctx.send("刪除失敗，已恢復頻道追蹤。請確認 Bot 有「管理頻道」權限。")
         except discord.HTTPException as error:
             print(f"Discord 無法刪除頻道 {channel.id}：{error}")
-            self.restore_owner_tracking(channel, owner_cog, owner_id)
+            await self.restore_owner_tracking(channel, owner_cog, owner_id)
             await ctx.send("Discord 暫時無法刪除頻道，已恢復頻道追蹤。")
 
 

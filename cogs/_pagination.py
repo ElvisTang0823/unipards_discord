@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-import sqlite3
+import psycopg
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Literal, cast
@@ -134,7 +134,7 @@ class PersistentPageButton(
     async def callback(self, interaction: discord.Interaction) -> None:
         try:
             pages = await self.get_pages(interaction)
-        except (OSError, RuntimeError, ValueError, sqlite3.Error):
+        except (OSError, RuntimeError, ValueError, psycopg.Error):
             logger.exception(
                 "Unable to load %s pagination item %s",
                 self.source,
@@ -223,28 +223,21 @@ class PersistentPageButton(
             from cogs.signup import Signup
 
             cog = bot.get_cog("Signup")
-            return (
-                [
-                    PaginationPage(embed=embed)
-                    for embed in cog.create_result_embeds_for_event(
-                        self.item_id,
-                        interaction.guild_id,
-                    )
-                ]
-                if isinstance(cog, Signup)
-                else []
+            if not isinstance(cog, Signup):
+                return []
+            return await cog.create_result_embeds_for_event(
+                self.item_id,
+                interaction.guild_id,
             )
 
         from cogs.order import Order
 
         cog = bot.get_cog("Order")
-        return (
-            cog.create_announcement_embeds_for_event(
-                self.item_id,
-                interaction.guild_id,
-            )
-            if isinstance(cog, Order)
-            else []
+        if not isinstance(cog, Order):
+            return []
+        return await cog.create_announcement_embeds_for_event(
+            self.item_id,
+            interaction.guild_id,
         )
 
 

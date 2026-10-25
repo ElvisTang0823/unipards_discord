@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-import sqlite3
+import psycopg
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 import discord
 from discord import app_commands
@@ -20,6 +20,7 @@ from cogs._pagination import (
     notify_event_creator,
 )
 from database import (
+    Database,
     add_signup_member,
     begin_signup_selection,
     complete_signup_event,
@@ -54,7 +55,7 @@ ORGANIZER_PICK_TIMEOUT = timedelta(minutes=30)
 logger = logging.getLogger(__name__)
 
 
-def signup_event_id(event: sqlite3.Row) -> int:
+def signup_event_id(event: dict[str, Any]) -> int:
     return int(event["id"])
 
 
@@ -75,13 +76,13 @@ class SignupNoteModal(discord.ui.Modal, title="報名備註"):
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         try:
-            saved = update_signup_member_note(
+            saved = await update_signup_member_note(
                 self.cog.database,
                 self.event_id,
                 interaction.user.id,
                 str(self.note.value).strip(),
             )
-        except sqlite3.Error:
+        except psycopg.Error:
             logger.exception(
                 "Unable to save signup note for event %s",
                 self.event_id,
@@ -118,7 +119,7 @@ class SignupPanelView(discord.ui.View):
         self.add_item(note_button)
 
     async def open_note(self, interaction: discord.Interaction) -> None:
-        event = get_signup_event(self.cog.database, self.event_id)
+        event = await get_signup_event(self.cog.database, self.event_id)
         if (
             event is None
             or event["status"] != "open"
@@ -141,7 +142,10 @@ class SignupPanelView(discord.ui.View):
             )
             return
 
-        signup_member = self.cog.get_signup_member(self.event_id, interaction.user.id)
+        signup_member = await self.cog.get_signup_member(
+            self.event_id,
+            interaction.user.id,
+        )
         if signup_member is None:
             await interaction.response.send_message(
                 "請先在此活動的 Discord 訊息加入 ✅ 完成報名，再填寫備註。",
@@ -163,8 +167,9 @@ class OrganizerSelectionView(discord.ui.View):
         cog: Signup,
         event_id: int,
         creator_id: int,
-        candidates: Sequence[sqlite3.Row],
+        candidates: Sequence[dict[str, Any]],
         selected_user_ids: set[int],
+        slots: int,
         page: int = 0,
     ) -> None:
         super().__init__(timeout=None)
@@ -173,6 +178,7 @@ class OrganizerSelectionView(discord.ui.View):
         self.creator_id = creator_id
         self.candidates = list(candidates)
         self.selected_user_ids = set(selected_user_ids)
+        self.slots = slots
         self.page = page
         self.refresh_items()
 
@@ -182,9 +188,8 @@ class OrganizerSelectionView(discord.ui.View):
         self.page = min(max(0, self.page), page_count - 1)
         page_candidates = self.candidates[self.page * 25 : (self.page + 1) * 25]
         page_ids = {int(row["user_id"]) for row in page_candidates}
-        slots = self.cog.selection_slots(self.event_id)
         selected_elsewhere = len(self.selected_user_ids - page_ids)
-        available_slots = max(1, slots - selected_elsewhere)
+        available_slots = max(1, self.slots - selected_elsewhere)
         select = discord.ui.Select(
             placeholder=f"選擇錄取者（第 {self.page + 1}/{page_count} 頁）",
             min_values=0,
@@ -231,7 +236,7 @@ class OrganizerSelectionView(discord.ui.View):
         self.add_item(confirm)
 
     async def check_owner(self, interaction: discord.Interaction) -> bool:
-        event = get_signup_event(self.cog.database, self.event_id)
+        event = await get_signup_event(self.cog.database, self.event_id)
         if (
             event is None
             or event["status"] != "selecting"
@@ -251,20 +256,22 @@ class OrganizerSelectionView(discord.ui.View):
         page_ids = {int(row["user_id"]) for row in page_candidates}
         selected = self.selected_user_ids - page_ids
         selected.update(int(value) for value in self.children[0].values)
-        if len(selected) > self.cog.selection_slots(self.event_id):
+        slots = await self.cog.selection_slots(self.event_id)
+        if len(selected) > slots:
             await interaction.response.send_message(
                 "錄取人數不可超過此活動剩餘名額。",
                 ephemeral=True,
             )
             return
+        self.slots = slots
         self.selected_user_ids = selected
         try:
-            set_signup_selected_user_ids(
+            await set_signup_selected_user_ids(
                 self.cog.database,
                 self.event_id,
                 json.dumps(sorted(selected)),
             )
-        except sqlite3.Error:
+        except psycopg.Error:
             logger.exception(
                 "Unable to save organizer selection for event %s",
                 self.event_id,
@@ -300,7 +307,7 @@ class OrganizerSelectionView(discord.ui.View):
                 self.event_id,
                 {self.creator_id, *self.selected_user_ids},
             )
-        except (discord.HTTPException, sqlite3.Error, RuntimeError, TypeError):
+        except (discord.HTTPException, psycopg.Error, RuntimeError, TypeError):
             logger.exception(
                 "Unable to finalize selected signup list for event %s",
                 self.event_id,
@@ -325,15 +332,15 @@ class Signup(commands.Cog):
         self.panel_event_ids: dict[int, int] = {}
 
     @property
-    def database(self) -> sqlite3.Connection:
+    def database(self) -> Database:
         connection = getattr(self.bot, "database", None)
-        if not isinstance(connection, sqlite3.Connection):
-            raise RuntimeError("SQLite 尚未初始化")
+        if not isinstance(connection, Database):
+            raise RuntimeError("PostgreSQL 尚未初始化")
         return connection
 
     async def cog_load(self) -> None:
         self.bot.add_dynamic_items(PersistentPageButton)
-        for event in get_open_signup_events(self.database):
+        for event in await get_open_signup_events(self.database):
             event_id = signup_event_id(event)
             message_id = event["panel_message_id"]
             if message_id is not None:
@@ -344,10 +351,17 @@ class Signup(commands.Cog):
                 )
 
             if event["status"] == "selecting" and event["selection_message_id"]:
-                candidates = self.get_eligible_members(event_id, exclude_creator=True)
+                candidates = await self.get_eligible_members(
+                    event_id,
+                    exclude_creator=True,
+                )
                 selected_ids = set(json.loads(event["selected_user_ids_json"]))
                 self.bot.add_view(
-                    self.create_selection_view(event, candidates, selected_ids),
+                    await self.create_selection_view(
+                        event,
+                        candidates,
+                        selected_ids,
+                    ),
                     message_id=int(event["selection_message_id"]),
                 )
         self.process_deadlines.start()
@@ -358,7 +372,7 @@ class Signup(commands.Cog):
     @tasks.loop(seconds=10)
     async def process_deadlines(self) -> None:
         now = datetime.now(timezone.utc)
-        for event in get_open_signup_events(self.database):
+        for event in await get_open_signup_events(self.database):
             event_id = signup_event_id(event)
             try:
                 if event["status"] in ("open", "closing") and datetime.fromisoformat(
@@ -372,7 +386,7 @@ class Signup(commands.Cog):
                         await self.send_organizer_selection(event)
                 elif event["status"] == "announcing":
                     await self.publish_announcement(event)
-            except (discord.HTTPException, sqlite3.Error, RuntimeError, TypeError, ValueError):
+            except (discord.HTTPException, psycopg.Error, RuntimeError, TypeError, ValueError):
                 logger.exception("Unable to process signup event %s", event_id)
 
     @process_deadlines.before_loop
@@ -405,12 +419,12 @@ class Signup(commands.Cog):
 
         event_id = self.panel_event_ids.get(payload.message_id)
         if event_id is None:
-            event = get_signup_event_by_message(self.database, payload.message_id)
+            event = await get_signup_event_by_message(self.database, payload.message_id)
             if event is None:
                 return
             event_id = signup_event_id(event)
             self.panel_event_ids[payload.message_id] = event_id
-        event = get_signup_event(self.database, event_id)
+        event = await get_signup_event(self.database, event_id)
         if (
             event is None
             or event["status"] != "open"
@@ -421,8 +435,8 @@ class Signup(commands.Cog):
 
         if not added:
             try:
-                remove_signup_member(self.database, event_id, payload.user_id)
-            except sqlite3.Error:
+                await remove_signup_member(self.database, event_id, payload.user_id)
+            except psycopg.Error:
                 logger.exception(
                     "Unable to remove signup for event %s, user %s",
                     event_id,
@@ -435,7 +449,7 @@ class Signup(commands.Cog):
             return
 
         try:
-            add_signup_member(
+            await add_signup_member(
                 self.database,
                 event_id,
                 payload.user_id,
@@ -446,60 +460,67 @@ class Signup(commands.Cog):
                 ),
                 datetime.now(timezone.utc).isoformat(),
             )
-        except sqlite3.Error:
+        except psycopg.Error:
             logger.exception(
                 "Unable to record signup for event %s, user %s",
                 event_id,
                 payload.user_id,
             )
 
-    def get_signup_member(
+    async def get_signup_member(
         self,
         event_id: int,
         user_id: int,
-    ) -> sqlite3.Row | None:
+    ) -> dict[str, Any] | None:
         return next(
             (
                 row
-                for row in get_signup_members(self.database, event_id)
+                for row in await get_signup_members(self.database, event_id)
                 if int(row["user_id"]) == user_id
             ),
             None,
         )
 
-    def get_eligible_members(
+    async def get_eligible_members(
         self,
         event_id: int,
         exclude_creator: bool = False,
-    ) -> list[sqlite3.Row]:
-        event = get_signup_event(self.database, event_id)
+    ) -> list[dict[str, Any]]:
+        event = await get_signup_event(self.database, event_id)
         if event is None:
             return []
         return [
             row
-            for row in get_signup_members(self.database, event_id)
+            for row in await get_signup_members(self.database, event_id)
             if row["eligible_at_cutoff"] == 1
             and (not exclude_creator or int(row["user_id"]) != int(event["creator_id"]))
         ]
 
-    def selection_slots(self, event_id: int) -> int:
-        event = get_signup_event(self.database, event_id)
+    async def selection_slots(self, event_id: int) -> int:
+        event = await get_signup_event(self.database, event_id)
         if event is None or int(event["capacity"]) == 0:
-            return len(self.get_eligible_members(event_id, exclude_creator=True))
+            return len(
+                await self.get_eligible_members(
+                    event_id,
+                    exclude_creator=True,
+                )
+            )
         return max(0, int(event["capacity"]) - 1)
 
-    def create_selection_view(
+    async def create_selection_view(
         self,
-        event: sqlite3.Row,
-        candidates: Sequence[sqlite3.Row],
+        event: dict[str, Any],
+        candidates: Sequence[dict[str, Any]],
         selected_ids: set[int],
     ) -> OrganizerSelectionView:
+        slots = await self.selection_slots(int(event["id"]))
         return OrganizerSelectionView(
             self,
             int(event["id"]),
             int(event["creator_id"]),
             candidates,
             selected_ids - {int(event["creator_id"])},
+            slots,
         )
 
     async def get_channel(
@@ -513,7 +534,7 @@ class Signup(commands.Cog):
             raise TypeError(f"Channel {channel_id} is not a text channel or thread")
         return channel
 
-    async def get_event_webhook(self, event: sqlite3.Row) -> discord.Webhook:
+    async def get_event_webhook(self, event: dict[str, Any]) -> discord.Webhook:
         webhook_id = event["webhook_id"]
         webhook_token = event["webhook_token"]
         if webhook_id is None or webhook_token is None:
@@ -595,7 +616,7 @@ class Signup(commands.Cog):
         creator_name = interaction.user.display_name
         creator_avatar_url = interaction.user.display_avatar.url
         try:
-            event_id = create_signup_event(
+            event_id = await create_signup_event(
                 self.database,
                 interaction.guild.id,
                 interaction.channel_id,
@@ -609,7 +630,7 @@ class Signup(commands.Cog):
                 "[]",
                 datetime.now(timezone.utc).isoformat(),
             )
-        except (sqlite3.Error, RuntimeError):
+        except (psycopg.Error, RuntimeError):
             logger.exception("Unable to create signup event")
             await interaction.followup.send(
                 "建立報名活動失敗，請稍後再試。",
@@ -630,7 +651,7 @@ class Signup(commands.Cog):
             )
             if webhook.token is None:
                 raise RuntimeError("Discord did not return a webhook token")
-            set_signup_event_webhook(
+            await set_signup_event_webhook(
                 self.database,
                 event_id,
                 webhook.id,
@@ -653,9 +674,9 @@ class Signup(commands.Cog):
             if isinstance(channel, discord.Thread):
                 kwargs["thread"] = channel
             panel_message = await webhook.send(embed=embed, **kwargs)
-            set_signup_event_message(self.database, event_id, panel_message.id)
+            await set_signup_event_message(self.database, event_id, panel_message.id)
             await panel_message.add_reaction(SIGNUP_EMOJI)
-        except (discord.Forbidden, discord.HTTPException, sqlite3.Error, RuntimeError, TypeError):
+        except (discord.Forbidden, discord.HTTPException, psycopg.Error, RuntimeError, TypeError):
             logger.exception("Unable to publish signup event %s", event_id)
             await self.cleanup_incomplete_event(event_id, panel_message, webhook)
             await interaction.followup.send(
@@ -716,8 +737,8 @@ class Signup(commands.Cog):
         webhook: discord.Webhook | None,
     ) -> None:
         try:
-            delete_signup_event(self.database, event_id)
-        except sqlite3.Error:
+            await delete_signup_event(self.database, event_id)
+        except psycopg.Error:
             logger.exception("Unable to delete incomplete signup event %s", event_id)
         if webhook is None:
             return
@@ -737,9 +758,9 @@ class Signup(commands.Cog):
                 event_id,
             )
 
-    async def handle_deadline(self, event: sqlite3.Row) -> None:
+    async def handle_deadline(self, event: dict[str, Any]) -> None:
         event_id = signup_event_id(event)
-        set_signup_event_status(self.database, event_id, "closing")
+        await set_signup_event_status(self.database, event_id, "closing")
         try:
             members = await self.get_reaction_members(event)
         except discord.NotFound:
@@ -754,9 +775,9 @@ class Signup(commands.Cog):
         if members is not None:
             existing_timestamps = {
                 int(row["user_id"]): str(row["registered_at"])
-                for row in get_signup_members(self.database, event_id)
+                for row in await get_signup_members(self.database, event_id)
             }
-            reconcile_signup_members(
+            await reconcile_signup_members(
                 self.database,
                 event_id,
                 [
@@ -773,14 +794,14 @@ class Signup(commands.Cog):
                 int(event["creator_id"]),
             )
 
-        member_rows = get_signup_members(self.database, event_id)
+        member_rows = await get_signup_members(self.database, event_id)
         active_ids = (
             {int(member.id) for member in members}
             if members is not None
             else set()
         )
         active_ids.add(int(event["creator_id"]))
-        set_signup_eligibility(
+        await set_signup_eligibility(
             self.database,
             event_id,
             {
@@ -792,12 +813,12 @@ class Signup(commands.Cog):
             },
         )
 
-        current_event = get_signup_event(self.database, event_id)
+        current_event = await get_signup_event(self.database, event_id)
         if current_event is None:
             return
         active_members = [
             row
-            for row in get_signup_members(self.database, event_id)
+            for row in await get_signup_members(self.database, event_id)
             if row["eligible_at_cutoff"] == 1
         ]
         capacity = int(current_event["capacity"])
@@ -809,22 +830,22 @@ class Signup(commands.Cog):
             return
 
         selection_deadline = datetime.now(timezone.utc) + ORGANIZER_PICK_TIMEOUT
-        begin_signup_selection(
+        await begin_signup_selection(
             self.database,
             event_id,
             selection_deadline.isoformat(),
             int(current_event["creator_id"]),
         )
         await self.disable_signup_panel(current_event)
-        selecting_event = get_signup_event(self.database, event_id)
-        if selecting_event is None or self.selection_slots(event_id) <= 0:
+        selecting_event = await get_signup_event(self.database, event_id)
+        if selecting_event is None or await self.selection_slots(event_id) <= 0:
             await self.finalize_by_registration_order(event_id)
             return
         await self.send_organizer_selection(selecting_event)
 
     async def get_reaction_members(
         self,
-        event: sqlite3.Row,
+        event: dict[str, Any],
     ) -> list[discord.User | discord.Member]:
         channel = await self.get_channel(int(event["channel_id"]))
         panel_id = event["panel_message_id"]
@@ -845,7 +866,7 @@ class Signup(commands.Cog):
             users.append(user)
         return users
 
-    async def disable_signup_panel(self, event: sqlite3.Row) -> None:
+    async def disable_signup_panel(self, event: dict[str, Any]) -> None:
         if event["panel_message_id"] is None:
             return
         webhook = await self.get_event_webhook(event)
@@ -879,7 +900,7 @@ class Signup(commands.Cog):
                 event["id"],
             )
 
-    async def send_organizer_selection(self, event: sqlite3.Row) -> None:
+    async def send_organizer_selection(self, event: dict[str, Any]) -> None:
         if event["selection_message_id"] is not None:
             return
         creator = self.bot.get_user(int(event["creator_id"]))
@@ -890,8 +911,11 @@ class Signup(commands.Cog):
                 logger.exception("Unable to fetch organizer for event %s", event["id"])
                 await self.finalize_by_registration_order(int(event["id"]))
                 return
-        candidates = self.get_eligible_members(int(event["id"]), exclude_creator=True)
-        view = self.create_selection_view(
+        candidates = await self.get_eligible_members(
+            int(event["id"]),
+            exclude_creator=True,
+        )
+        view = await self.create_selection_view(
             event,
             candidates,
             set(json.loads(event["selected_user_ids_json"])),
@@ -906,7 +930,7 @@ class Signup(commands.Cog):
             logger.exception("Unable to DM organizer for signup event %s", event["id"])
             await self.finalize_by_registration_order(int(event["id"]))
             return
-        set_signup_selection_message(
+        await set_signup_selection_message(
             self.database,
             int(event["id"]),
             message.channel.id,
@@ -915,11 +939,11 @@ class Signup(commands.Cog):
         self.bot.add_view(view, message_id=message.id)
 
     async def finalize_by_registration_order(self, event_id: int) -> None:
-        event = get_signup_event(self.database, event_id)
+        event = await get_signup_event(self.database, event_id)
         if event is None:
             return
         capacity = int(event["capacity"])
-        eligible = self.get_eligible_members(event_id)
+        eligible = await self.get_eligible_members(event_id)
         eligible.sort(key=lambda row: (row["registered_at"], int(row["user_id"])))
         accepted = eligible if capacity == 0 else eligible[:capacity]
         await self.finalize_event(
@@ -928,12 +952,12 @@ class Signup(commands.Cog):
         )
 
     async def finalize_event(self, event_id: int, selected_ids: set[int]) -> bool:
-        event = get_signup_event(self.database, event_id)
+        event = await get_signup_event(self.database, event_id)
         if event is None:
             return False
         eligible_ids = {
             int(row["user_id"])
-            for row in self.get_eligible_members(event_id)
+            for row in await self.get_eligible_members(event_id)
         }
         creator_id = int(event["creator_id"])
         accepted_ids = (selected_ids & eligible_ids) | {creator_id}
@@ -941,7 +965,7 @@ class Signup(commands.Cog):
         if capacity > 0 and len(accepted_ids) > capacity:
             creator_first = [creator_id] + sorted(accepted_ids - {creator_id})
             accepted_ids = set(creator_first[:capacity])
-        finalized = finalize_signup_event(
+        finalized = await finalize_signup_event(
             self.database,
             event_id,
             sorted(accepted_ids),
@@ -952,10 +976,10 @@ class Signup(commands.Cog):
         return True
 
     async def publish_announcement(self, event_id: int) -> None:
-        event = get_signup_event(self.database, event_id)
+        event = await get_signup_event(self.database, event_id)
         if event is None or event["status"] != "announcing":
             return
-        members = get_signup_members(self.database, event_id)
+        members = await get_signup_members(self.database, event_id)
         accepted = [row for row in members if row["result"] == "accepted"]
         waitlist = [row for row in members if row["result"] == "waitlist"]
         accepted.sort(key=lambda row: (row["registered_at"], int(row["user_id"])))
@@ -1004,14 +1028,14 @@ class Signup(commands.Cog):
             )
         else:
             announcement_published = True
-            set_signup_announcement_message_ids(
+            await set_signup_announcement_message_ids(
                 self.database,
                 event_id,
                 json.dumps([int(message_id)]),
             )
 
         await self.send_creator_notes(event, members)
-        complete_signup_event(self.database, event_id)
+        await complete_signup_event(self.database, event_id)
         if announcement_published:
             await notify_event_creator(
                 self.bot,
@@ -1031,11 +1055,11 @@ class Signup(commands.Cog):
     @staticmethod
     def create_result_embeds(
         title: str,
-        accepted: Sequence[sqlite3.Row],
-        waitlist: Sequence[sqlite3.Row],
+        accepted: Sequence[dict[str, Any]],
+        waitlist: Sequence[dict[str, Any]],
         deadline: datetime,
     ) -> list[discord.Embed]:
-        lines: list[tuple[str, Sequence[sqlite3.Row]]] = []
+        lines: list[tuple[str, Sequence[dict[str, Any]]]] = []
         if accepted:
             lines.append(("錄取名單", accepted))
         if waitlist:
@@ -1074,19 +1098,19 @@ class Signup(commands.Cog):
             )
         return embeds
 
-    def create_result_embeds_for_event(
+    async def create_result_embeds_for_event(
         self,
         event_id: int,
         guild_id: int | None,
     ) -> list[PaginationPage]:
-        event = get_signup_event(self.database, event_id)
+        event = await get_signup_event(self.database, event_id)
         if (
             event is None
             or event["status"] != "closed"
             or guild_id != int(event["guild_id"])
         ):
             return []
-        members = get_signup_members(self.database, event_id)
+        members = await get_signup_members(self.database, event_id)
         accepted = [row for row in members if row["result"] == "accepted"]
         waitlist = [row for row in members if row["result"] == "waitlist"]
         accepted.sort(key=lambda row: (row["registered_at"], int(row["user_id"])))
@@ -1103,8 +1127,8 @@ class Signup(commands.Cog):
 
     async def send_creator_notes(
         self,
-        event: sqlite3.Row,
-        members: Sequence[sqlite3.Row],
+        event: dict[str, Any],
+        members: Sequence[dict[str, Any]],
     ) -> None:
         notes = [
             f"{row['display_name']}：{row['note']}"

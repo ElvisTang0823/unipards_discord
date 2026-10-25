@@ -1,201 +1,341 @@
+import asyncio
 import json
-import sqlite3
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial, wraps
 from pathlib import Path
+from typing import Any, Awaitable, Callable, Concatenate, ParamSpec, TypeVar, cast
+
+import pgembed
+import psycopg
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
-def initialize_database(database_path: Path) -> sqlite3.Connection:
-    database_path.parent.mkdir(parents=True, exist_ok=True)
-    connection = sqlite3.connect(database_path)
-    connection.row_factory = sqlite3.Row
+class Database:
+    def __init__(self, pool: ConnectionPool) -> None:
+        self.pool = pool
+        self.executor = ThreadPoolExecutor(
+            max_workers=4,
+            thread_name_prefix="postgres-db",
+        )
+        self.queue: asyncio.Queue[
+            tuple[
+                Callable[..., Any],
+                tuple[Any, ...],
+                dict[str, Any],
+                asyncio.Future[Any],
+            ]
+        ] = asyncio.Queue(maxsize=32)
+        self.workers: list[asyncio.Task[None]] = []
+        self.accepting = False
 
-    try:
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS bot_settings (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-            """
+    async def open(self) -> None:
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(
+            self.executor,
+            partial(self.pool.open, wait=True),
         )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS channel_owners (
-                feature TEXT NOT NULL,
-                channel_id INTEGER NOT NULL,
-                owner_id INTEGER NOT NULL,
-                PRIMARY KEY (feature, channel_id)
-            )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS vote_polls (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                message_id INTEGER,
-                creator_id INTEGER NOT NULL,
-                creator_name TEXT NOT NULL DEFAULT '',
-                creator_avatar_url TEXT NOT NULL DEFAULT '',
-                title TEXT NOT NULL,
-                description TEXT NOT NULL,
-                options_json TEXT NOT NULL,
-                max_votes INTEGER NOT NULL,
-                deadline_at TEXT NOT NULL,
-                webhook_id INTEGER,
-                webhook_token TEXT,
-                status TEXT NOT NULL DEFAULT 'open'
-                    CHECK (status IN ('open', 'closing', 'closed')),
-                result_message_id INTEGER,
-                created_at TEXT NOT NULL
-            )
-            """
-        )
-        poll_columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(vote_polls)")
-        }
-        for column_name, definition in (
-            ("creator_name", "TEXT NOT NULL DEFAULT ''"),
-            ("creator_avatar_url", "TEXT NOT NULL DEFAULT ''"),
-            ("webhook_id", "INTEGER"),
-            ("webhook_token", "TEXT"),
-        ):
-            if column_name not in poll_columns:
-                connection.execute(
-                    f"ALTER TABLE vote_polls ADD COLUMN {column_name} {definition}"
+        self.accepting = True
+        self.workers = [
+            asyncio.create_task(self._worker(), name=f"postgres-db-{index}")
+            for index in range(4)
+        ]
+
+    async def run(self, function: Callable[..., Any], *args: Any) -> Any:
+        return await self._submit(function, args, {})
+
+    async def _submit(
+        self,
+        function: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        if not self.accepting:
+            raise RuntimeError("PostgreSQL database is not accepting operations")
+        loop = asyncio.get_running_loop()
+        result: asyncio.Future[Any] = loop.create_future()
+        try:
+            self.queue.put_nowait((function, args, kwargs, result))
+        except asyncio.QueueFull as error:
+            raise DatabaseBusyError(
+                "PostgreSQL operation queue is full"
+            ) from error
+        return await result
+
+    async def _worker(self) -> None:
+        loop = asyncio.get_running_loop()
+        while True:
+            function, args, kwargs, result = await self.queue.get()
+            try:
+                value = await loop.run_in_executor(
+                    self.executor,
+                    partial(self._run_with_kwargs, function, args, kwargs),
                 )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS vote_ballots (
-                poll_id INTEGER NOT NULL,
-                voter_id INTEGER NOT NULL,
-                option_index INTEGER NOT NULL,
-                PRIMARY KEY (poll_id, voter_id, option_index),
-                FOREIGN KEY (poll_id) REFERENCES vote_polls(id)
-                    ON DELETE CASCADE
-            )
-            """
+            except Exception as error:
+                if not result.done():
+                    result.set_exception(error)
+            else:
+                if not result.done():
+                    result.set_result(value)
+            finally:
+                self.queue.task_done()
+
+    def _run_with_kwargs(
+        self,
+        function: Callable[..., Any],
+        args: tuple[Any, ...],
+        kwargs: dict[str, Any],
+    ) -> Any:
+        with self.pool.connection() as connection:
+            return function(connection, *args, **kwargs)
+
+    async def close(self) -> None:
+        self.accepting = False
+        await self.queue.join()
+        for worker in self.workers:
+            worker.cancel()
+        if self.workers:
+            await asyncio.gather(*self.workers, return_exceptions=True)
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(self.executor, self.pool.close)
+        await asyncio.to_thread(self.executor.shutdown, wait=True)
+
+
+class DatabaseBusyError(psycopg.OperationalError):
+    pass
+
+
+def database_operation(
+    function: Callable[Concatenate[psycopg.Connection[Any], P], R],
+) -> Callable[Concatenate[Database, P], Awaitable[R]]:
+    @wraps(function)
+    async def run(
+        database: Database,
+        *args: P.args,
+        **kwargs: P.kwargs,
+    ) -> R:
+        return await database._submit(
+            function,
+            args,
+            dict(kwargs),
         )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_vote_polls_status_deadline
-            ON vote_polls(status, deadline_at)
-            """
+
+    return cast(Callable[Concatenate[Database, P], Awaitable[R]], run)
+
+
+def _initialize_schema(connection: psycopg.Connection[Any]) -> None:
+    statements = (
+        """
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
         )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS signup_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                panel_message_id INTEGER,
-                creator_id INTEGER NOT NULL,
-                creator_name TEXT NOT NULL,
-                creator_avatar_url TEXT NOT NULL,
-                title TEXT NOT NULL,
-                description TEXT NOT NULL,
-                deadline_at TEXT NOT NULL,
-                capacity INTEGER NOT NULL DEFAULT 0,
-                role_ids_json TEXT NOT NULL,
-                webhook_id INTEGER,
-                webhook_token TEXT,
-                status TEXT NOT NULL DEFAULT 'open'
-                    CHECK (status IN ('open', 'closing', 'selecting', 'announcing', 'closed')),
-                selection_deadline_at TEXT,
-                selection_message_id INTEGER,
-                selection_channel_id INTEGER,
-                selected_user_ids_json TEXT NOT NULL DEFAULT '[]',
-                announcement_message_ids_json TEXT NOT NULL DEFAULT '[]',
-                organizer_notice_message_id INTEGER,
-                created_at TEXT NOT NULL
-            )
-            """
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS channel_owners (
+            feature TEXT NOT NULL,
+            channel_id BIGINT NOT NULL,
+            owner_id BIGINT NOT NULL,
+            PRIMARY KEY (feature, channel_id)
         )
-        signup_columns = {
-            row["name"]
-            for row in connection.execute("PRAGMA table_info(signup_events)")
-        }
-        if "organizer_notice_message_id" not in signup_columns:
-            connection.execute(
-                "ALTER TABLE signup_events ADD COLUMN organizer_notice_message_id INTEGER"
-            )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS signup_members (
-                event_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                display_name TEXT NOT NULL,
-                registered_at TEXT NOT NULL,
-                note TEXT NOT NULL DEFAULT '',
-                eligible_at_cutoff INTEGER,
-                result TEXT CHECK (result IN ('accepted', 'waitlist', 'ineligible')),
-                PRIMARY KEY (event_id, user_id),
-                FOREIGN KEY (event_id) REFERENCES signup_events(id)
-                    ON DELETE CASCADE
-            )
-            """
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS vote_polls (
+            id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            guild_id BIGINT NOT NULL,
+            channel_id BIGINT NOT NULL,
+            message_id BIGINT,
+            creator_id BIGINT NOT NULL,
+            creator_name TEXT NOT NULL DEFAULT '',
+            creator_avatar_url TEXT NOT NULL DEFAULT '',
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            options_json TEXT NOT NULL,
+            max_votes INTEGER NOT NULL,
+            deadline_at TEXT NOT NULL,
+            webhook_id BIGINT,
+            webhook_token TEXT,
+            status TEXT NOT NULL DEFAULT 'open'
+                CHECK (status IN ('open', 'closing', 'closed')),
+            result_message_id BIGINT,
+            created_at TEXT NOT NULL
         )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_signup_events_status_deadline
-            ON signup_events(status, deadline_at)
-            """
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS vote_ballots (
+            poll_id BIGINT NOT NULL REFERENCES vote_polls(id) ON DELETE CASCADE,
+            voter_id BIGINT NOT NULL,
+            option_index INTEGER NOT NULL,
+            PRIMARY KEY (poll_id, voter_id, option_index)
         )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS order_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                guild_id INTEGER NOT NULL,
-                channel_id INTEGER NOT NULL,
-                panel_message_id INTEGER,
-                creator_id INTEGER NOT NULL,
-                creator_name TEXT NOT NULL,
-                creator_avatar_url TEXT NOT NULL,
-                title TEXT NOT NULL,
-                description TEXT NOT NULL,
-                attachment_url TEXT NOT NULL,
-                deadline_at TEXT NOT NULL,
-                webhook_id INTEGER,
-                webhook_token TEXT,
-                status TEXT NOT NULL DEFAULT 'open'
-                    CHECK (status IN ('open', 'announcing', 'closed')),
-                announcement_message_ids_json TEXT NOT NULL DEFAULT '[]',
-                created_at TEXT NOT NULL
-            )
-            """
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_vote_polls_status_deadline
+        ON vote_polls(status, deadline_at)
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS signup_events (
+            id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            guild_id BIGINT NOT NULL,
+            channel_id BIGINT NOT NULL,
+            panel_message_id BIGINT,
+            creator_id BIGINT NOT NULL,
+            creator_name TEXT NOT NULL,
+            creator_avatar_url TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            deadline_at TEXT NOT NULL,
+            capacity INTEGER NOT NULL DEFAULT 0,
+            role_ids_json TEXT NOT NULL,
+            webhook_id BIGINT,
+            webhook_token TEXT,
+            status TEXT NOT NULL DEFAULT 'open'
+                CHECK (
+                    status IN (
+                        'open', 'closing', 'selecting', 'announcing', 'closed'
+                    )
+                ),
+            selection_deadline_at TEXT,
+            selection_message_id BIGINT,
+            selection_channel_id BIGINT,
+            selected_user_ids_json TEXT NOT NULL DEFAULT '[]',
+            announcement_message_ids_json TEXT NOT NULL DEFAULT '[]',
+            organizer_notice_message_id BIGINT,
+            created_at TEXT NOT NULL
         )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS order_participants (
-                event_id INTEGER NOT NULL,
-                user_id INTEGER NOT NULL,
-                display_name TEXT NOT NULL,
-                items TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (event_id, user_id),
-                FOREIGN KEY (event_id) REFERENCES order_events(id)
-                    ON DELETE CASCADE
-            )
-            """
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS signup_members (
+            event_id BIGINT NOT NULL REFERENCES signup_events(id) ON DELETE CASCADE,
+            user_id BIGINT NOT NULL,
+            display_name TEXT NOT NULL,
+            registered_at TEXT NOT NULL,
+            note TEXT NOT NULL DEFAULT '',
+            eligible_at_cutoff INTEGER,
+            result TEXT CHECK (result IN ('accepted', 'waitlist', 'ineligible')),
+            PRIMARY KEY (event_id, user_id)
         )
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_order_events_status_deadline
-            ON order_events(status, deadline_at)
-            """
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_signup_events_status_deadline
+        ON signup_events(status, deadline_at)
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS order_events (
+            id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+            guild_id BIGINT NOT NULL,
+            channel_id BIGINT NOT NULL,
+            panel_message_id BIGINT,
+            creator_id BIGINT NOT NULL,
+            creator_name TEXT NOT NULL,
+            creator_avatar_url TEXT NOT NULL,
+            title TEXT NOT NULL,
+            description TEXT NOT NULL,
+            attachment_url TEXT NOT NULL,
+            deadline_at TEXT NOT NULL,
+            webhook_id BIGINT,
+            webhook_token TEXT,
+            status TEXT NOT NULL DEFAULT 'open'
+                CHECK (status IN ('open', 'announcing', 'closed')),
+            announcement_message_ids_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL
         )
-        connection.commit()
-    except sqlite3.Error:
-        connection.close()
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS order_participants (
+            event_id BIGINT NOT NULL REFERENCES order_events(id) ON DELETE CASCADE,
+            user_id BIGINT NOT NULL,
+            display_name TEXT NOT NULL,
+            items TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (event_id, user_id)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_order_events_status_deadline
+        ON order_events(status, deadline_at)
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS command_rate_limits (
+            user_id BIGINT NOT NULL,
+            bucket TEXT NOT NULL,
+            last_request_at TIMESTAMPTZ NOT NULL,
+            previous_request_at TIMESTAMPTZ,
+            PRIMARY KEY (user_id, bucket)
+        )
+        """,
+        """
+        CREATE INDEX IF NOT EXISTS idx_command_rate_limits_last_request
+        ON command_rate_limits(last_request_at)
+        """,
+    )
+    for statement in statements:
+        connection.execute(statement)
+
+
+def _executemany(
+    connection: psycopg.Connection[Any],
+    query: str,
+    parameters: Any,
+) -> None:
+    with connection.cursor() as cursor:
+        cursor.executemany(query, parameters)
+
+
+async def initialize_database(database_url: str) -> Database:
+    pool = ConnectionPool(
+        conninfo=database_url,
+        min_size=1,
+        max_size=4,
+        timeout=15,
+        kwargs={
+            "row_factory": dict_row,
+            "connect_timeout": 10,
+            "options": "-c statement_timeout=10000",
+        },
+        open=False,
+    )
+    database = Database(pool)
+    try:
+        await database.open()
+        await database.run(_initialize_schema)
+    except Exception:
+        await database.close()
         raise
+    return database
 
-    return connection
+
+def _start_embedded_postgres(
+    data_directory: Path,
+) -> pgembed.PostgresServer:
+    data_directory.parent.mkdir(parents=True, exist_ok=True)
+    server = pgembed.get_server(data_directory, cleanup_mode="stop")
+    return server.__enter__()
 
 
+async def initialize_embedded_database(
+    data_directory: Path,
+) -> tuple[Database, pgembed.PostgresServer]:
+    server = await asyncio.to_thread(_start_embedded_postgres, data_directory)
+    try:
+        database = await initialize_database(server.get_uri())
+    except BaseException:
+        await asyncio.to_thread(server.__exit__, None, None, None)
+        raise
+    return database, server
+
+
+async def close_embedded_postgres(server: pgembed.PostgresServer) -> None:
+    # Exiting stop mode preserves the data directory; cleanup() deletes it.
+    await asyncio.to_thread(server.__exit__, None, None, None)
+
+
+@database_operation
 def create_vote_poll(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     guild_id: int,
     channel_id: int,
     creator_id: int,
@@ -214,7 +354,8 @@ def create_vote_poll(
             guild_id, channel_id, creator_id, creator_name, creator_avatar_url,
             title, description, options_json, max_votes, deadline_at, created_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
         """,
         (
             guild_id,
@@ -231,11 +372,12 @@ def create_vote_poll(
         ),
     )
     connection.commit()
-    return int(cursor.lastrowid)
+    return int(cursor.fetchone()["id"])
 
 
+@database_operation
 def set_vote_poll_webhook(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     poll_id: int,
     webhook_id: int,
     webhook_token: str,
@@ -243,15 +385,16 @@ def set_vote_poll_webhook(
     connection.execute(
         """
         UPDATE vote_polls
-        SET webhook_id = ?, webhook_token = ?
-        WHERE id = ?
+        SET webhook_id = %s, webhook_token = %s
+        WHERE id = %s
         """,
         (webhook_id, webhook_token, poll_id),
     )
     connection.commit()
 
 
-def get_open_vote_polls(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+@database_operation
+def get_open_vote_polls(connection: psycopg.Connection[Any]) -> list[dict[str, Any]]:
     return list(
         connection.execute(
             """
@@ -263,42 +406,46 @@ def get_open_vote_polls(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     )
 
 
+@database_operation
 def get_vote_poll(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     poll_id: int,
-) -> sqlite3.Row | None:
+) -> dict[str, Any] | None:
     return connection.execute(
-        "SELECT * FROM vote_polls WHERE id = ?",
+        "SELECT * FROM vote_polls WHERE id = %s",
         (poll_id,),
     ).fetchone()
 
 
+@database_operation
 def set_vote_poll_message(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     poll_id: int,
     message_id: int,
 ) -> None:
     connection.execute(
-        "UPDATE vote_polls SET message_id = ? WHERE id = ?",
+        "UPDATE vote_polls SET message_id = %s WHERE id = %s",
         (message_id, poll_id),
     )
     connection.commit()
 
 
-def delete_vote_poll(connection: sqlite3.Connection, poll_id: int) -> None:
-    connection.execute("DELETE FROM vote_polls WHERE id = ?", (poll_id,))
+@database_operation
+def delete_vote_poll(connection: psycopg.Connection[Any], poll_id: int) -> None:
+    connection.execute("DELETE FROM vote_polls WHERE id = %s", (poll_id,))
     connection.commit()
 
 
+@database_operation
 def get_vote_selection(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     poll_id: int,
     voter_id: int,
 ) -> list[int]:
     rows = connection.execute(
         """
         SELECT option_index FROM vote_ballots
-        WHERE poll_id = ? AND voter_id = ?
+        WHERE poll_id = %s AND voter_id = %s
         ORDER BY option_index
         """,
         (poll_id, voter_id),
@@ -306,15 +453,16 @@ def get_vote_selection(
     return [int(row["option_index"]) for row in rows]
 
 
+@database_operation
 def replace_vote_selection(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     poll_id: int,
     voter_id: int,
     option_indices: list[int],
 ) -> str:
-    with connection:
+    with connection.transaction():
         poll = connection.execute(
-            "SELECT status, max_votes, options_json FROM vote_polls WHERE id = ?",
+            "SELECT status, max_votes, options_json FROM vote_polls WHERE id = %s",
             (poll_id,),
         ).fetchone()
         if poll is None or poll["status"] != "open":
@@ -330,13 +478,14 @@ def replace_vote_selection(
             return "invalid"
 
         connection.execute(
-            "DELETE FROM vote_ballots WHERE poll_id = ? AND voter_id = ?",
+            "DELETE FROM vote_ballots WHERE poll_id = %s AND voter_id = %s",
             (poll_id, voter_id),
         )
-        connection.executemany(
+        _executemany(
+            connection,
             """
             INSERT INTO vote_ballots (poll_id, voter_id, option_index)
-            VALUES (?, ?, ?)
+            VALUES (%s, %s, %s)
             """,
             (
                 (poll_id, voter_id, option_index)
@@ -346,45 +495,48 @@ def replace_vote_selection(
         return "saved"
 
 
+@database_operation
 def set_vote_result_message(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     poll_id: int,
     result_message_id: int,
 ) -> None:
     connection.execute(
-        "UPDATE vote_polls SET result_message_id = ? WHERE id = ?",
+        "UPDATE vote_polls SET result_message_id = %s WHERE id = %s",
         (result_message_id, poll_id),
     )
     connection.commit()
 
 
+@database_operation
 def begin_vote_poll_close(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     poll_id: int,
-) -> sqlite3.Row | None:
-    with connection:
+) -> dict[str, Any] | None:
+    with connection.transaction():
         poll = connection.execute(
-            "SELECT * FROM vote_polls WHERE id = ?",
+            "SELECT * FROM vote_polls WHERE id = %s",
             (poll_id,),
         ).fetchone()
         if poll is None or poll["status"] == "closed":
             return None
         connection.execute(
-            "UPDATE vote_polls SET status = 'closing' WHERE id = ?",
+            "UPDATE vote_polls SET status = 'closing' WHERE id = %s",
             (poll_id,),
         )
     return poll
 
 
+@database_operation
 def get_vote_results(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     poll_id: int,
 ) -> tuple[dict[int, int], int, int]:
     rows = connection.execute(
         """
         SELECT option_index, COUNT(*) AS vote_count
         FROM vote_ballots
-        WHERE poll_id = ?
+        WHERE poll_id = %s
         GROUP BY option_index
         """,
         (poll_id,),
@@ -393,31 +545,33 @@ def get_vote_results(
     totals = connection.execute(
         """
         SELECT COUNT(DISTINCT voter_id) AS voter_count, COUNT(*) AS ballot_count
-        FROM vote_ballots WHERE poll_id = ?
+        FROM vote_ballots WHERE poll_id = %s
         """,
         (poll_id,),
     ).fetchone()
     return counts, int(totals["voter_count"]), int(totals["ballot_count"])
 
 
+@database_operation
 def complete_vote_poll(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     poll_id: int,
     result_message_id: int,
 ) -> None:
-    with connection:
+    with connection.transaction():
         connection.execute(
             """
             UPDATE vote_polls
-            SET status = 'closed', result_message_id = ?, webhook_token = NULL
-            WHERE id = ?
+            SET status = 'closed', result_message_id = %s, webhook_token = NULL
+            WHERE id = %s
             """,
             (result_message_id, poll_id),
         )
 
 
+@database_operation
 def create_signup_event(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     guild_id: int,
     channel_id: int,
     creator_id: int,
@@ -430,7 +584,7 @@ def create_signup_event(
     role_ids_json: str,
     created_at: str,
 ) -> int:
-    with connection:
+    with connection.transaction():
         cursor = connection.execute(
             """
             INSERT INTO signup_events (
@@ -438,7 +592,8 @@ def create_signup_event(
                 creator_avatar_url, title, description, deadline_at,
                 capacity, role_ids_json, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
             """,
             (
                 guild_id,
@@ -454,67 +609,72 @@ def create_signup_event(
                 created_at,
             ),
         )
-        event_id = int(cursor.lastrowid)
+        event_id = int(cursor.fetchone()["id"])
         connection.execute(
             """
             INSERT INTO signup_members (
                 event_id, user_id, display_name, registered_at, eligible_at_cutoff, result
             )
-            VALUES (?, ?, ?, ?, 1, 'accepted')
+            VALUES (%s, %s, %s, %s, 1, 'accepted')
             """,
             (event_id, creator_id, creator_name, created_at),
         )
     return event_id
 
 
+@database_operation
 def set_signup_event_webhook(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     webhook_id: int,
     webhook_token: str,
 ) -> None:
-    with connection:
+    with connection.transaction():
         connection.execute(
-            "UPDATE signup_events SET webhook_id = ?, webhook_token = ? WHERE id = ?",
+            "UPDATE signup_events SET webhook_id = %s, webhook_token = %s WHERE id = %s",
             (webhook_id, webhook_token, event_id),
         )
 
 
+@database_operation
 def set_signup_event_message(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     message_id: int,
 ) -> None:
-    with connection:
+    with connection.transaction():
         connection.execute(
-            "UPDATE signup_events SET panel_message_id = ? WHERE id = ?",
+            "UPDATE signup_events SET panel_message_id = %s WHERE id = %s",
             (message_id, event_id),
         )
 
 
+@database_operation
 def get_signup_event(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
-) -> sqlite3.Row | None:
+) -> dict[str, Any] | None:
     return connection.execute(
-        "SELECT * FROM signup_events WHERE id = ?",
+        "SELECT * FROM signup_events WHERE id = %s",
         (event_id,),
     ).fetchone()
 
 
+@database_operation
 def get_signup_event_by_message(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     message_id: int,
-) -> sqlite3.Row | None:
+) -> dict[str, Any] | None:
     return connection.execute(
-        "SELECT * FROM signup_events WHERE panel_message_id = ?",
+        "SELECT * FROM signup_events WHERE panel_message_id = %s",
         (message_id,),
     ).fetchone()
 
 
+@database_operation
 def get_open_signup_events(
-    connection: sqlite3.Connection,
-) -> list[sqlite3.Row]:
+    connection: psycopg.Connection[Any],
+) -> list[dict[str, Any]]:
     return list(
         connection.execute(
             """
@@ -526,51 +686,55 @@ def get_open_signup_events(
     )
 
 
-def delete_signup_event(connection: sqlite3.Connection, event_id: int) -> None:
-    with connection:
-        connection.execute("DELETE FROM signup_events WHERE id = ?", (event_id,))
+@database_operation
+def delete_signup_event(connection: psycopg.Connection[Any], event_id: int) -> None:
+    with connection.transaction():
+        connection.execute("DELETE FROM signup_events WHERE id = %s", (event_id,))
 
 
+@database_operation
 def add_signup_member(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     user_id: int,
     display_name: str,
     registered_at: str,
 ) -> bool:
-    with connection:
+    with connection.transaction():
         cursor = connection.execute(
             """
-            INSERT OR IGNORE INTO signup_members (
+            INSERT INTO signup_members (
                 event_id, user_id, display_name, registered_at
             )
-            SELECT ?, ?, ?, ?
+            SELECT %s, %s, %s, %s
             WHERE EXISTS (
                 SELECT 1 FROM signup_events
-                WHERE id = ? AND status = 'open'
+                WHERE id = %s AND status = 'open'
             )
+            ON CONFLICT DO NOTHING
             """,
             (event_id, user_id, display_name, registered_at, event_id),
         )
     return cursor.rowcount > 0
 
 
+@database_operation
 def remove_signup_member(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     user_id: int,
 ) -> bool:
-    with connection:
+    with connection.transaction():
         cursor = connection.execute(
             """
             DELETE FROM signup_members
-            WHERE event_id = ? AND user_id = ?
+            WHERE event_id = %s AND user_id = %s
                 AND user_id != (
-                    SELECT creator_id FROM signup_events WHERE id = ?
+                    SELECT creator_id FROM signup_events WHERE id = %s
                 )
                 AND EXISTS (
                     SELECT 1 FROM signup_events
-                    WHERE id = ? AND status = 'open'
+                    WHERE id = %s AND status = 'open'
                 )
             """,
             (event_id, user_id, event_id, event_id),
@@ -578,21 +742,22 @@ def remove_signup_member(
     return cursor.rowcount > 0
 
 
+@database_operation
 def update_signup_member_note(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     user_id: int,
     note: str,
 ) -> bool:
-    with connection:
+    with connection.transaction():
         cursor = connection.execute(
             """
             UPDATE signup_members
-            SET note = ?
-            WHERE event_id = ? AND user_id = ?
+            SET note = %s
+            WHERE event_id = %s AND user_id = %s
                 AND EXISTS (
                     SELECT 1 FROM signup_events
-                    WHERE id = ? AND status = 'open'
+                    WHERE id = %s AND status = 'open'
                 )
             """,
             (note, event_id, user_id, event_id),
@@ -600,15 +765,16 @@ def update_signup_member_note(
     return cursor.rowcount > 0
 
 
+@database_operation
 def get_signup_members(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
-) -> list[sqlite3.Row]:
+) -> list[dict[str, Any]]:
     return list(
         connection.execute(
             """
             SELECT * FROM signup_members
-            WHERE event_id = ?
+            WHERE event_id = %s
             ORDER BY registered_at, user_id
             """,
             (event_id,),
@@ -616,25 +782,27 @@ def get_signup_members(
     )
 
 
+@database_operation
 def reconcile_signup_members(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     active_members: list[tuple[int, str, str]],
     creator_id: int,
 ) -> None:
-    with connection:
+    with connection.transaction():
         active_ids = {user_id for user_id, _, _ in active_members}
         active_ids.add(creator_id)
         existing_ids = {
             int(row["user_id"])
             for row in connection.execute(
-                "SELECT user_id FROM signup_members WHERE event_id = ?",
+                "SELECT user_id FROM signup_members WHERE event_id = %s",
                 (event_id,),
             )
         }
         stale_ids = existing_ids - active_ids - {creator_id}
-        connection.executemany(
-            "DELETE FROM signup_members WHERE event_id = ? AND user_id = ?",
+        _executemany(
+            connection,
+            "DELETE FROM signup_members WHERE event_id = %s AND user_id = %s",
             ((event_id, user_id) for user_id in stale_ids),
         )
         for user_id, display_name, registered_at in active_members:
@@ -643,7 +811,7 @@ def reconcile_signup_members(
                 INSERT INTO signup_members (
                     event_id, user_id, display_name, registered_at
                 )
-                VALUES (?, ?, ?, ?)
+                VALUES (%s, %s, %s, %s)
                 ON CONFLICT(event_id, user_id) DO UPDATE SET
                     display_name = excluded.display_name
                 """,
@@ -651,16 +819,18 @@ def reconcile_signup_members(
             )
 
 
+@database_operation
 def set_signup_eligibility(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     eligibility: dict[int, bool],
 ) -> None:
-    with connection:
-        connection.executemany(
+    with connection.transaction():
+        _executemany(
+            connection,
             """
-            UPDATE signup_members SET eligible_at_cutoff = ?
-            WHERE event_id = ? AND user_id = ?
+            UPDATE signup_members SET eligible_at_cutoff = %s
+            WHERE event_id = %s AND user_id = %s
             """,
             (
                 (int(is_eligible), event_id, user_id)
@@ -669,19 +839,20 @@ def set_signup_eligibility(
         )
 
 
+@database_operation
 def begin_signup_selection(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     deadline_at: str,
     creator_id: int,
 ) -> None:
-    with connection:
+    with connection.transaction():
         connection.execute(
             """
             UPDATE signup_events
-            SET status = 'selecting', selection_deadline_at = ?,
-                selected_user_ids_json = ?
-            WHERE id = ? AND status IN ('open', 'closing')
+            SET status = 'selecting', selection_deadline_at = %s,
+                selected_user_ids_json = %s
+            WHERE id = %s AND status IN ('open', 'closing')
             """,
             (deadline_at, json.dumps([creator_id]), event_id),
         )
@@ -690,61 +861,64 @@ def begin_signup_selection(
             UPDATE signup_members
             SET result = CASE
                 WHEN user_id = (
-                    SELECT creator_id FROM signup_events WHERE id = ?
+                    SELECT creator_id FROM signup_events WHERE id = %s
                 ) THEN 'accepted'
                 WHEN eligible_at_cutoff = 1 THEN 'waitlist'
                 ELSE 'ineligible'
             END
-            WHERE event_id = ?
+            WHERE event_id = %s
             """,
             (event_id, event_id),
         )
 
 
+@database_operation
 def set_signup_selection_message(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     channel_id: int,
     message_id: int,
 ) -> None:
-    with connection:
+    with connection.transaction():
         connection.execute(
             """
             UPDATE signup_events
-            SET selection_channel_id = ?, selection_message_id = ?
-            WHERE id = ?
+            SET selection_channel_id = %s, selection_message_id = %s
+            WHERE id = %s
             """,
             (channel_id, message_id, event_id),
         )
 
 
+@database_operation
 def set_signup_selected_user_ids(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     user_ids_json: str,
 ) -> None:
-    with connection:
+    with connection.transaction():
         connection.execute(
-            "UPDATE signup_events SET selected_user_ids_json = ? WHERE id = ?",
+            "UPDATE signup_events SET selected_user_ids_json = %s WHERE id = %s",
             (user_ids_json, event_id),
         )
 
 
+@database_operation
 def finalize_signup_event(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     accepted_user_ids: list[int],
     announcement_message_ids_json: str = "[]",
 ) -> bool:
     accepted_ids = set(accepted_user_ids)
-    with connection:
+    with connection.transaction():
         cursor = connection.execute(
             """
             UPDATE signup_events
             SET status = 'announcing',
-                selected_user_ids_json = ?,
-                announcement_message_ids_json = ?
-            WHERE id = ? AND status IN ('closing', 'selecting')
+                selected_user_ids_json = %s,
+                announcement_message_ids_json = %s
+            WHERE id = %s AND status IN ('closing', 'selecting')
             """,
             (
                 json.dumps(sorted(accepted_ids)),
@@ -756,14 +930,15 @@ def finalize_signup_event(
             return False
 
         rows = connection.execute(
-            "SELECT user_id, eligible_at_cutoff FROM signup_members WHERE event_id = ?",
+            "SELECT user_id, eligible_at_cutoff FROM signup_members WHERE event_id = %s",
             (event_id,),
         ).fetchall()
-        connection.executemany(
+        _executemany(
+            connection,
             """
             UPDATE signup_members
-            SET result = ?
-            WHERE event_id = ? AND user_id = ?
+            SET result = %s
+            WHERE event_id = %s AND user_id = %s
             """,
             (
                 (
@@ -781,56 +956,61 @@ def finalize_signup_event(
     return True
 
 
+@database_operation
 def set_signup_announcement_message_ids(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     message_ids_json: str,
 ) -> None:
-    with connection:
+    with connection.transaction():
         connection.execute(
-            "UPDATE signup_events SET announcement_message_ids_json = ? WHERE id = ?",
+            "UPDATE signup_events SET announcement_message_ids_json = %s WHERE id = %s",
             (message_ids_json, event_id),
         )
 
 
+@database_operation
 def set_signup_organizer_notice_message_id(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     message_id: int,
 ) -> None:
-    with connection:
+    with connection.transaction():
         connection.execute(
-            "UPDATE signup_events SET organizer_notice_message_id = ? WHERE id = ?",
+            "UPDATE signup_events SET organizer_notice_message_id = %s WHERE id = %s",
             (message_id, event_id),
         )
 
 
+@database_operation
 def set_signup_event_status(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     status: str,
 ) -> None:
-    with connection:
+    with connection.transaction():
         connection.execute(
-            "UPDATE signup_events SET status = ? WHERE id = ?",
+            "UPDATE signup_events SET status = %s WHERE id = %s",
             (status, event_id),
         )
 
 
-def complete_signup_event(connection: sqlite3.Connection, event_id: int) -> None:
-    with connection:
+@database_operation
+def complete_signup_event(connection: psycopg.Connection[Any], event_id: int) -> None:
+    with connection.transaction():
         connection.execute(
             """
             UPDATE signup_events
             SET status = 'closed', webhook_token = NULL
-            WHERE id = ?
+            WHERE id = %s
             """,
             (event_id,),
         )
 
 
+@database_operation
 def create_order_event(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     guild_id: int,
     channel_id: int,
     creator_id: int,
@@ -842,7 +1022,7 @@ def create_order_event(
     deadline_at: str,
     created_at: str,
 ) -> int:
-    with connection:
+    with connection.transaction():
         cursor = connection.execute(
             """
             INSERT INTO order_events (
@@ -850,7 +1030,8 @@ def create_order_event(
                 creator_avatar_url, title, description, attachment_url,
                 deadline_at, created_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
             """,
             (
                 guild_id,
@@ -865,55 +1046,59 @@ def create_order_event(
                 created_at,
             ),
         )
-        event_id = int(cursor.lastrowid)
+        event_id = int(cursor.fetchone()["id"])
         connection.execute(
             """
             INSERT INTO order_participants (
                 event_id, user_id, display_name, items, updated_at
             )
-            VALUES (?, ?, ?, '', ?)
+            VALUES (%s, %s, %s, '', %s)
             """,
             (event_id, creator_id, creator_name, created_at),
         )
     return event_id
 
 
+@database_operation
 def set_order_event_webhook(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     webhook_id: int,
     webhook_token: str,
 ) -> None:
-    with connection:
+    with connection.transaction():
         connection.execute(
-            "UPDATE order_events SET webhook_id = ?, webhook_token = ? WHERE id = ?",
+            "UPDATE order_events SET webhook_id = %s, webhook_token = %s WHERE id = %s",
             (webhook_id, webhook_token, event_id),
         )
 
 
+@database_operation
 def set_order_event_message(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     message_id: int,
 ) -> None:
-    with connection:
+    with connection.transaction():
         connection.execute(
-            "UPDATE order_events SET panel_message_id = ? WHERE id = ?",
+            "UPDATE order_events SET panel_message_id = %s WHERE id = %s",
             (message_id, event_id),
         )
 
 
+@database_operation
 def get_order_event(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
-) -> sqlite3.Row | None:
+) -> dict[str, Any] | None:
     return connection.execute(
-        "SELECT * FROM order_events WHERE id = ?",
+        "SELECT * FROM order_events WHERE id = %s",
         (event_id,),
     ).fetchone()
 
 
-def get_open_order_events(connection: sqlite3.Connection) -> list[sqlite3.Row]:
+@database_operation
+def get_open_order_events(connection: psycopg.Connection[Any]) -> list[dict[str, Any]]:
     return list(
         connection.execute(
             """
@@ -925,34 +1110,36 @@ def get_open_order_events(connection: sqlite3.Connection) -> list[sqlite3.Row]:
     )
 
 
-def delete_order_event(connection: sqlite3.Connection, event_id: int) -> None:
-    with connection:
-        connection.execute("DELETE FROM order_events WHERE id = ?", (event_id,))
+@database_operation
+def delete_order_event(connection: psycopg.Connection[Any], event_id: int) -> None:
+    with connection.transaction():
+        connection.execute("DELETE FROM order_events WHERE id = %s", (event_id,))
 
 
+@database_operation
 def save_order_items(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     user_id: int,
     display_name: str,
     items: str,
     updated_at: str,
 ) -> bool:
-    with connection:
+    with connection.transaction():
         if not items:
             connection.execute(
                 """
                 DELETE FROM order_participants
-                WHERE event_id = ? AND user_id = ?
+                WHERE event_id = %s AND user_id = %s
                     AND EXISTS (
                         SELECT 1 FROM order_events
-                        WHERE id = ? AND status = 'open'
+                        WHERE id = %s AND status = 'open'
                     )
                 """,
                 (event_id, user_id, event_id),
             )
             event = connection.execute(
-                "SELECT status FROM order_events WHERE id = ?",
+                "SELECT status FROM order_events WHERE id = %s",
                 (event_id,),
             ).fetchone()
             return event is not None and event["status"] == "open"
@@ -962,10 +1149,10 @@ def save_order_items(
             INSERT INTO order_participants (
                 event_id, user_id, display_name, items, updated_at
             )
-            SELECT ?, ?, ?, ?, ?
+            SELECT %s, %s, %s, %s, %s
             WHERE EXISTS (
                 SELECT 1 FROM order_events
-                WHERE id = ? AND status = 'open'
+                WHERE id = %s AND status = 'open'
             )
             ON CONFLICT(event_id, user_id) DO UPDATE SET
                 display_name = excluded.display_name,
@@ -977,15 +1164,16 @@ def save_order_items(
     return cursor.rowcount > 0
 
 
+@database_operation
 def get_order_participants(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
-) -> list[sqlite3.Row]:
+) -> list[dict[str, Any]]:
     return list(
         connection.execute(
             """
             SELECT * FROM order_participants
-            WHERE event_id = ?
+            WHERE event_id = %s
             ORDER BY updated_at, user_id
             """,
             (event_id,),
@@ -993,85 +1181,183 @@ def get_order_participants(
     )
 
 
+@database_operation
 def set_order_event_status(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     status: str,
     expected_status: str | None = None,
 ) -> bool:
-    with connection:
+    with connection.transaction():
         if expected_status is None:
             cursor = connection.execute(
-                "UPDATE order_events SET status = ? WHERE id = ?",
+                "UPDATE order_events SET status = %s WHERE id = %s",
                 (status, event_id),
             )
         else:
             cursor = connection.execute(
-                "UPDATE order_events SET status = ? WHERE id = ? AND status = ?",
+                "UPDATE order_events SET status = %s WHERE id = %s AND status = %s",
                 (status, event_id, expected_status),
             )
     return cursor.rowcount > 0
 
 
+@database_operation
 def set_order_announcement_message_ids(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     event_id: int,
     message_ids_json: str,
 ) -> None:
-    with connection:
+    with connection.transaction():
         connection.execute(
-            "UPDATE order_events SET announcement_message_ids_json = ? WHERE id = ?",
+            "UPDATE order_events SET announcement_message_ids_json = %s WHERE id = %s",
             (message_ids_json, event_id),
         )
 
 
-def complete_order_event(connection: sqlite3.Connection, event_id: int) -> None:
-    with connection:
+@database_operation
+def complete_order_event(connection: psycopg.Connection[Any], event_id: int) -> None:
+    with connection.transaction():
         connection.execute(
             """
             UPDATE order_events
             SET status = 'closed', webhook_token = NULL
-            WHERE id = ?
+            WHERE id = %s
             """,
             (event_id,),
         )
 
 
+@database_operation
 def load_channel_owners(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     feature: str,
 ) -> dict[int, int]:
     rows = connection.execute(
-        "SELECT channel_id, owner_id FROM channel_owners WHERE feature = ?",
+        "SELECT channel_id, owner_id FROM channel_owners WHERE feature = %s",
         (feature,),
     )
     return {int(row["channel_id"]): int(row["owner_id"]) for row in rows}
 
 
-def load_all_channel_owners(connection: sqlite3.Connection) -> dict[int, int]:
+@database_operation
+def load_all_channel_owners(connection: psycopg.Connection[Any]) -> dict[int, int]:
     rows = connection.execute(
         "SELECT channel_id, owner_id FROM channel_owners"
     )
     return {int(row["channel_id"]): int(row["owner_id"]) for row in rows}
 
 
+@database_operation
 def save_channel_owners(
-    connection: sqlite3.Connection,
+    connection: psycopg.Connection[Any],
     feature: str,
     owners: dict[int, int],
 ) -> None:
-    with connection:
+    with connection.transaction():
         connection.execute(
-            "DELETE FROM channel_owners WHERE feature = ?",
+            "DELETE FROM channel_owners WHERE feature = %s",
             (feature,),
         )
-        connection.executemany(
+        _executemany(
+            connection,
             """
             INSERT INTO channel_owners (feature, channel_id, owner_id)
-            VALUES (?, ?, ?)
+            VALUES (%s, %s, %s)
             """,
             (
                 (feature, channel_id, owner_id)
                 for channel_id, owner_id in owners.items()
             ),
         )
+
+
+@database_operation
+def consume_command_rate_limit(
+    connection: psycopg.Connection[Any],
+    user_id: int,
+    bucket: str,
+) -> tuple[bool, float]:
+    if bucket == "commands":
+        allowed = connection.execute(
+            """
+            INSERT INTO command_rate_limits (
+                user_id, bucket, last_request_at, previous_request_at
+            )
+            VALUES (%s, %s, clock_timestamp(), NULL)
+            ON CONFLICT (user_id, bucket) DO UPDATE
+            SET previous_request_at = command_rate_limits.last_request_at,
+                last_request_at = clock_timestamp()
+            WHERE command_rate_limits.previous_request_at IS NULL
+                OR command_rate_limits.previous_request_at
+                    <= clock_timestamp() - INTERVAL '1 second'
+            RETURNING user_id
+            """,
+            (user_id, bucket),
+        ).fetchone()
+        if allowed is not None:
+            return True, 0.0
+        retry_after = connection.execute(
+            """
+            SELECT GREATEST(
+                0,
+                EXTRACT(
+                    EPOCH FROM (
+                        previous_request_at + INTERVAL '1 second'
+                        - clock_timestamp()
+                    )
+                )
+            ) AS retry_after
+            FROM command_rate_limits
+            WHERE user_id = %s AND bucket = %s
+            """,
+            (user_id, bucket),
+        ).fetchone()
+    elif bucket == "create":
+        allowed = connection.execute(
+            """
+            INSERT INTO command_rate_limits (
+                user_id, bucket, last_request_at, previous_request_at
+            )
+            VALUES (%s, %s, clock_timestamp(), NULL)
+            ON CONFLICT (user_id, bucket) DO UPDATE
+            SET previous_request_at = command_rate_limits.last_request_at,
+                last_request_at = clock_timestamp()
+            WHERE command_rate_limits.last_request_at
+                <= clock_timestamp() - INTERVAL '1 hour'
+            RETURNING user_id
+            """,
+            (user_id, bucket),
+        ).fetchone()
+        if allowed is not None:
+            return True, 0.0
+        retry_after = connection.execute(
+            """
+            SELECT GREATEST(
+                0,
+                EXTRACT(
+                    EPOCH FROM (
+                        last_request_at + INTERVAL '1 hour'
+                        - clock_timestamp()
+                    )
+                )
+            ) AS retry_after
+            FROM command_rate_limits
+            WHERE user_id = %s AND bucket = %s
+            """,
+            (user_id, bucket),
+        ).fetchone()
+    else:
+        raise ValueError(f"Unknown command rate-limit bucket: {bucket}")
+
+    return False, float(retry_after["retry_after"])
+
+
+@database_operation
+def cleanup_command_rate_limits(connection: psycopg.Connection[Any]) -> None:
+    connection.execute(
+        """
+        DELETE FROM command_rate_limits
+        WHERE last_request_at < clock_timestamp() - INTERVAL '1 day'
+        """
+    )

@@ -1,12 +1,12 @@
 import asyncio
 import logging
-import sqlite3
+import psycopg
 
 import discord
 from discord.ext import commands
 
 from cogs.channel_permissions import send_permission_guide
-from database import load_channel_owners, save_channel_owners
+from database import Database, load_channel_owners, save_channel_owners
 
 
 TRIGGER_CHANNEL_ID = 1556272392458735668
@@ -19,35 +19,36 @@ class TempVoice(commands.Cog):
         self.managed_channels: dict[int, int] = {}
         self.ownership_ready = False
         self.channel_lock = asyncio.Lock()
-        self.load_ownership()
+        self.ownership_save_lock = asyncio.Lock()
 
-    def load_ownership(self) -> None:
+    async def cog_load(self) -> None:
         try:
             if self.bot.database is None:
-                raise RuntimeError("SQLite 尚未初始化")
-            self.managed_channels = load_channel_owners(
+                raise RuntimeError("PostgreSQL 尚未初始化")
+            self.managed_channels = await load_channel_owners(
                 self.bot.database,
                 "voice",
             )
-        except (sqlite3.Error, RuntimeError, TypeError, ValueError):
+        except (psycopg.Error, RuntimeError, TypeError, ValueError):
             logger.exception("Unable to load temporary voice channel ownership")
             self.ownership_ready = False
             return
         self.ownership_ready = True
 
-    def save_ownership(self) -> bool:
-        try:
-            if self.bot.database is None:
-                raise RuntimeError("SQLite 尚未初始化")
-            save_channel_owners(
-                self.bot.database,
-                "voice",
-                self.managed_channels,
-            )
-        except (sqlite3.Error, RuntimeError, TypeError, ValueError):
-            logger.exception("Unable to save temporary voice channel ownership")
-            return False
-        return True
+    async def save_ownership(self) -> bool:
+        async with self.ownership_save_lock:
+            try:
+                if self.bot.database is None:
+                    raise RuntimeError("PostgreSQL 尚未初始化")
+                await save_channel_owners(
+                    self.bot.database,
+                    "voice",
+                    dict(self.managed_channels),
+                )
+            except (psycopg.Error, RuntimeError, TypeError, ValueError):
+                logger.exception("Unable to save temporary voice channel ownership")
+                return False
+            return True
 
     def find_owner_channel(
         self, guild: discord.Guild, owner_id: int
@@ -139,7 +140,7 @@ class TempVoice(commands.Cog):
             return
 
         owner_id = self.managed_channels.pop(channel.id)
-        if not self.save_ownership():
+        if not await self.save_ownership():
             self.managed_channels[channel.id] = owner_id
 
     async def move_to_owner_channel(self, member: discord.Member):
@@ -215,7 +216,7 @@ class TempVoice(commands.Cog):
             return
 
         self.managed_channels[channel.id] = member.id
-        if not self.save_ownership():
+        if not await self.save_ownership():
             try:
                 await channel.delete(reason="無法保存個人語音頻道建立者資料")
             except (discord.Forbidden, discord.HTTPException):
@@ -274,7 +275,7 @@ class TempVoice(commands.Cog):
                 await self.ensure_bot_access(channel)
             elif channel is not None:
                 self.managed_channels.pop(channel_id, None)
-                self.save_ownership()
+                await self.save_ownership()
 
     @commands.Cog.listener()
     async def on_guild_channel_update(
@@ -299,7 +300,7 @@ class TempVoice(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
         owner_id = self.managed_channels.pop(channel.id, None)
-        if owner_id is not None and not self.save_ownership():
+        if owner_id is not None and not await self.save_ownership():
             self.managed_channels[channel.id] = owner_id
 
     @commands.Cog.listener()
