@@ -1,3 +1,5 @@
+"""Shared pagination UI and event-notification helpers."""
+
 from __future__ import annotations
 
 import logging

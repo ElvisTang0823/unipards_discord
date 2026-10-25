@@ -12,7 +12,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from cogs._text import normalize_multiline_text
-from cogs.pagination import (
+from cogs._pagination import (
     PaginationPage,
     PersistentPageButton,
     ResultPaginationEntryView,

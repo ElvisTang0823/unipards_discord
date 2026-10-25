@@ -6,7 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from cogs.pagination import (
+from cogs._pagination import (
     PaginationPage,
     PersistentPageButton,
     PrivateEmbedPaginator,

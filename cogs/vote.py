@@ -12,7 +12,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs._text import normalize_multiline_text
-from cogs.pagination import format_event_footer, notify_event_creator
+from cogs._pagination import format_event_footer, notify_event_creator
 from database import (
     begin_vote_poll_close,
     complete_vote_poll,
