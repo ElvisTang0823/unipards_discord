@@ -57,6 +57,14 @@ def configure_logging() -> Path:
 async def initialize_bot_database() -> tuple[Database, PostgresServer | None]:
     database_url = os.getenv("DATABASE_URL", "").strip()
     if database_url:
+        try:
+            psycopg.conninfo.conninfo_to_dict(database_url)
+        except psycopg.ProgrammingError as error:
+            raise ValueError(
+                "DATABASE_URL must be a PostgreSQL connection URI "
+                "(postgresql://...) or libpq keyword string; a host:port "
+                "address by itself is not a database connection string."
+            ) from error
         database = await initialize_database(database_url)
         logger.info("Configured PostgreSQL database initialized")
         return database, None
