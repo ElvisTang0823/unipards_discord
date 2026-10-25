@@ -4,7 +4,7 @@
 
 ## 環境需求
 
-- Python 3.12 或更新版本（需有 `pgembed` 對應作業系統／架構的套件 wheel）
+- Python 3.12 或更新版本（需有 `pgembed` 對應作業系統／架構的套件 wheel；本機已驗證 Python 3.14.8／Windows x64 的相依安裝及資料庫 smoke test）
 - Discord Bot Token
 - 不需預先安裝 PostgreSQL Server 或建立資料庫
 
