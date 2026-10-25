@@ -1,6 +1,6 @@
 # Unipards Discord Bot
 
-以 Python 建立的 Discord Bot 起始專案。指令功能放在 `cogs/`，使用 `pgembed` 在專案內啟動 PostgreSQL 17，資料目錄位於 `data/postgres/`。
+以 Python 建立的 Discord Bot 起始專案。指令功能放在 `cogs/`，預設使用 `pgembed` 在專案內啟動 PostgreSQL 17；也可透過 `DATABASE_URL` 連線到託管 PostgreSQL。
 
 ## 環境需求
 
@@ -27,9 +27,11 @@
 
    ```env
    DISCORD_TOKEN=你的BotToken
+   # Optional: use the hosting provider's PostgreSQL instead of embedded PostgreSQL.
+   # DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/DATABASE
    ```
 
-   `pip install -r requirements.txt` 會安裝 Psycopg 用戶端與 `pgembed` PostgreSQL Server。Bot 啟動時會在專案內的 `data/postgres/` 初始化資料庫及 schema；不需要 `DATABASE_URL`、外部服務或手動設定連接埠。原 SQLite 資料庫已備份到 `data/backups/bot.sqlite3`，不會匯入新資料庫。
+   `pip install -r requirements.txt` 會安裝 Psycopg 用戶端與 `pgembed` PostgreSQL Server。未設定 `DATABASE_URL` 時，Bot 會在專案內的 `data/postgres/` 啟動 PostgreSQL 並初始化 schema，不需要預先安裝資料庫或設定連接埠。若託管平台提供 PostgreSQL，請在 `.env` 或平台環境變數設定 `DATABASE_URL`，Bot 會改連該資料庫並初始化所需 schema，不啟動內嵌 PostgreSQL。請勿將含密碼的連線字串提交到版本控制。原 SQLite 資料庫已備份到 `data/backups/bot.sqlite3`，不會匯入新資料庫。
 
    `data/` 已加入 `.gitignore`，包含 PostgreSQL 資料與舊資料備份，不會隨原始碼提交。打包或複製資料前請先完整停止 Bot；PostgreSQL 原生資料目錄只能在相容作業系統／架構及相同 PostgreSQL 主要版本間直接搬移，跨平台需用 `pg_dump`／還原。線上託管只有在主機提供持久化磁碟，且支援該平台的 `pgembed` wheel 時才適合此模式；暫存磁碟可能在重新部署時清空資料。
 

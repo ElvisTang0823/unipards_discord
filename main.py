@@ -20,6 +20,7 @@ from database import (
     cleanup_command_rate_limits,
     consume_command_rate_limit,
     initialize_embedded_database,
+    initialize_database,
 )
 
 
@@ -51,6 +52,20 @@ def configure_logging() -> Path:
         ],
     )
     return log_path
+
+
+async def initialize_bot_database() -> tuple[Database, PostgresServer | None]:
+    database_url = os.getenv("DATABASE_URL", "").strip()
+    if database_url:
+        database = await initialize_database(database_url)
+        logger.info("Configured PostgreSQL database initialized")
+        return database, None
+
+    database, postgres_server = await initialize_embedded_database(
+        BASE_DIR / "data" / "postgres"
+    )
+    logger.info("Project-local PostgreSQL database initialized")
+    return database, postgres_server
 
 
 class SharedCommandRateLimit(commands.CommandError):
@@ -127,12 +142,10 @@ class DiscordBot(commands.Bot):
         self.add_check(self._rate_limit_prefix_command)
 
     async def setup_hook(self) -> None:
-        self.database, self.postgres_server = await initialize_embedded_database(
-            BASE_DIR / "data" / "postgres"
-        )
-        await cleanup_command_rate_limits(self.database)
+        database, self.postgres_server = await initialize_bot_database()
+        self.database = database
+        await cleanup_command_rate_limits(database)
         self.cleanup_rate_limits.start()
-        logger.info("Project-local PostgreSQL database initialized")
 
         available_cogs = {
             cog_file.stem
