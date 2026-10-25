@@ -200,7 +200,10 @@ class FirstRss(commands.Cog):
             embed.set_footer(text=f"{FOOTER_PREFIX}{entry.guid}")
             try:
                 await channel.send(
-                    content=f"<@&{TARGET_ROLE_ID}>",
+                    content=(
+                        f":loudspeaker: FRC部落格更新囉！來看看最新的文章~ "
+                        f"<@&{TARGET_ROLE_ID}>"
+                    ),
                     embed=embed,
                     allowed_mentions=allowed_mentions,
                 )
