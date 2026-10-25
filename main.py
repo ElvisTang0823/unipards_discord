@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import os
+import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
@@ -44,23 +45,66 @@ class DiscordBot(commands.Bot):
         intents.guild_reactions = True
         super().__init__(command_prefix="!", intents=intents)
         self.database: sqlite3.Connection | None = None
-        self._legacy_guild_info_cleanup_complete = False
+        self._guild_command_cleanup_complete = False
+        self._cog_test_mode = False
+        self._registered_global_commands: set[str] = set()
 
     async def setup_hook(self) -> None:
         self.database = initialize_database(DATABASE_PATH)
         logger.info("SQLite database initialized")
 
-        for cog_file in sorted(COGS_DIR.glob("*.py")):
-            if cog_file.name != "__init__.py" and not cog_file.name.startswith("_"):
-                await self.load_extension(f"cogs.{cog_file.stem}")
-                logger.info("Loaded cog: %s", cog_file.stem)
+        available_cogs = {
+            cog_file.stem
+            for cog_file in COGS_DIR.glob("*.py")
+            if cog_file.name != "__init__.py"
+            and not cog_file.name.startswith("_")
+        }
+        configured_cogs = os.getenv("BOT_COGS")
+        if configured_cogs is None:
+            cogs_to_load = sorted(available_cogs)
+        else:
+            self._cog_test_mode = True
+            requested_cogs = configured_cogs.strip()
+            cogs_to_load = (
+                ["vote"]
+                if not requested_cogs
+                else list(
+                    dict.fromkeys(
+                        cog_name
+                        for cog_name in re.split(r"[\s,]+", requested_cogs)
+                        if cog_name
+                    )
+                )
+            )
+            unknown_cogs = sorted(set(cogs_to_load) - available_cogs)
+            if unknown_cogs:
+                raise ValueError(
+                    "BOT_COGS contains unknown cog(s): "
+                    + ", ".join(unknown_cogs)
+                )
 
+        for cog_name in cogs_to_load:
+            await self.load_extension(f"cogs.{cog_name}")
+            logger.info("Loaded cog: %s", cog_name)
+
+        self._registered_global_commands = {
+            command.name
+            for command in self.tree.get_commands()
+        }
         synced_commands = await self.tree.sync()
-        logger.info(
-            "Synced %s application command(s): %s",
-            len(synced_commands),
-            ", ".join(command.name for command in synced_commands),
-        )
+        if self._cog_test_mode:
+            logger.info(
+                "Cog isolation enabled; loaded %s and synchronized %s global "
+                "application command(s)",
+                ", ".join(cogs_to_load),
+                len(synced_commands),
+            )
+        else:
+            logger.info(
+                "Synchronized %s global application command(s): %s",
+                len(synced_commands),
+                ", ".join(command.name for command in synced_commands),
+            )
 
     async def on_ready(self) -> None:
         logger.info("Logged in as %s (ID: %s)", self.user, self.user.id)
@@ -74,7 +118,7 @@ class DiscordBot(commands.Bot):
         except discord.HTTPException:
             logger.exception("Unable to update bot activity presence")
 
-        if self._legacy_guild_info_cleanup_complete:
+        if self._guild_command_cleanup_complete:
             return
 
         cleanup_complete = True
@@ -83,12 +127,14 @@ class DiscordBot(commands.Bot):
                 guild_commands = await self.tree.fetch_commands(guild=guild)
                 for command in guild_commands:
                     if (
-                        command.name == "info"
+                        command.name in self._registered_global_commands
                         and command.type is discord.AppCommandType.chat_input
                     ):
                         await command.delete()
                         logger.info(
-                            "Removed stale guild-scoped /info command from guild %s",
+                            "Removed guild-scoped /%s command that conflicts "
+                            "with its global definition in guild %s",
+                            command.name,
                             guild.id,
                         )
             except discord.HTTPException:
@@ -98,16 +144,16 @@ class DiscordBot(commands.Bot):
                     guild.id,
                 )
 
-        self._legacy_guild_info_cleanup_complete = cleanup_complete
+        self._guild_command_cleanup_complete = cleanup_complete
 
     async def close(self) -> None:
         try:
+            await super().close()
+        finally:
             if self.database is not None:
                 self.database.close()
                 self.database = None
                 logger.info("SQLite database connection closed")
-        finally:
-            await super().close()
 
 
 async def main() -> None:
