@@ -75,6 +75,8 @@ py main.py
 - `!list`：列出目前自動建立頻道明確允許與拒絕（包括使用 `!deny` 拒絕）的成員、身分組，以及發言／語音連線權限。
 - `!close`：由建立者將活動討論群移至封存分類；封存後只有原本明確獲准檢視的對象可讀取歷史，且不可發言，Bot 會解除追蹤。臨時群組／個人語音頻道則會刪除。
 
+Bot 會每分鐘檢查 FIRST FRC Community RSS 的最新三則文章，並在頻道 `1555919971002089595` 發送尚未發布的卡片、提及身分組 `1555933526665334977`。卡片顯示文章標題、RSS 圖片與原文連結，footer 使用 RSS GUID 去重，顏色為 `#ED1C24`。此功能不使用資料庫；每次啟動會讀取該頻道訊息中的 RSS footer 建立記憶體索引，並依最新三則文章補發缺少的項目。
+
 加入指定語音入口頻道（`1556272392458735668`）會自動建立個人語音頻道並將成員移入；頻道空置後會自動刪除。自動建頻的建立者資料存放於 `channel_owners` 資料表。
 
 啟動時會自動載入 `cogs/` 內的 Cog，並在專案內的 PostgreSQL 資料庫建立 `bot_settings`、`channel_owners`、`vote_polls`、`vote_ballots`、`signup_events`、`signup_members`、`order_events`、`order_participants` 與 `command_rate_limits` 資料表。
