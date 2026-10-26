@@ -333,7 +333,7 @@ def _start_embedded_postgres(
             if log_argument >= len(command_arguments):
                 raise ValueError("pg_ctl -l requires a log file path")
             command_arguments[log_argument] = str(
-                data_directory / "pgembed-server.log"
+                data_directory.parent / f"{data_directory.name}-pgembed-server.log"
             )
         command_kwargs = dict(kwargs)
         command_kwargs["timeout"] = PGEMBED_START_TIMEOUT_SECONDS
