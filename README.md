@@ -108,7 +108,17 @@ Set-Location .\unipards_discord
 
 使用中的更新分支必須同時是本地目前分支及 `.env` 的 `UPDATE_BRANCH`。測試此功能分支時請設定 `UPDATE_BRANCH=feature/approved-local-updates`；功能合併到 `master` 後，若要追蹤正式分支則改為 `UPDATE_BRANCH=master`。從 ZIP 搬到 clone 時，請在舊 Bot 完全停止後，將自己的 `.env` 複製到 clone，並按一般安裝步驟在 clone 重新建立 `.venv`、安裝套件。不要複製舊 `.venv`；若要沿用本機 PostgreSQL 資料，請在 Bot 和 PostgreSQL 都停止後備份並搬移 `data/`，避免覆蓋或遺失現有資料。
 
-更新主機須已設定可讓 Git 非互動式存取 `origin` 的憑證。專案根目錄的 `run_bot.bat` 使用 `.venv` 中的 Python 啟動 Bot，程序結束後等待 3 秒再啟動；更新完成時由此腳本載入新程式。
+要讓 Bot 關閉後自動重新啟動，必須從專案根目錄執行 `run_bot.bat`，並保持該命令視窗開啟：
+
+```powershell
+.\run_bot.bat
+```
+
+不要直接用 `.\.venv\Scripts\python.exe main.py` 啟動後期待它自行重啟；直接啟動時，Bot 程序結束就會停止，沒有外部程序負責再次啟動。`run_bot.bat` 會使用 `.venv` 中的 Python；每次 Bot 程序結束後，批次檔會顯示「Bot stopped. Restarting in 3 seconds...」，等待 3 秒再啟動。自動更新按鈕關閉 Bot 後，也必須由此批次檔重新啟動。若你是用 Windows 工作排程器開機啟動，請設定它執行專案中的 `run_bot.bat`，而不是直接執行 `main.py` 或 Python。
+
+若關閉日誌沒有出現「PostgreSQL database pool closed」，請確認執行目錄內的 `database.py` 是最新版本；pool 關閉警告是資源清理問題，與批次檔是否負責重啟是不同問題。GitHub ZIP 不支援內建自動拉取；使用 ZIP 時需手動取得新版程式，再由 `run_bot.bat` 啟動。
+
+更新主機須已設定可讓 Git 非互動式存取 `origin` 的憑證。
 
 ### 僅啟動投票功能進行測試
 

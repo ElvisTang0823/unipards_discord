@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 from cogs._config import required_snowflake
@@ -193,6 +194,24 @@ class UpdateManager(commands.Cog):
             return
         if not sent:
             await ctx.send("已有待審核的更新卡片，請直接使用該卡片。")
+
+    @app_commands.command(name="test", description="確認自動更新程式及目前載入版本")
+    async def test_update(self, interaction: discord.Interaction) -> None:
+        details = ["自動更新程式 OK"]
+        if self._loaded_commit is None:
+            details.append("無法取得啟動時載入的 Git commit。")
+        else:
+            details.append(f"啟動時載入版本：`{self._loaded_commit[:12]}`")
+            if self._loaded_branch is not None:
+                details.append(f"分支：`{self._loaded_branch}`")
+            if self._loaded_worktree_clean is True:
+                details.append("啟動時工作目錄：乾淨")
+            elif self._loaded_worktree_clean is False:
+                details.append("啟動時工作目錄：有未提交變更")
+        await interaction.response.send_message(
+            "\n".join(details),
+            ephemeral=True,
+        )
 
     async def get_update_status(self) -> UpdateStatus:
         root_result, repository_root, git_error = await run_process(
