@@ -4,13 +4,16 @@ import psycopg
 import discord
 from discord.ext import commands
 
+from cogs._config import required_snowflake, required_snowflake_list
 from database import Database, load_all_channel_owners
 
 
-DESTINATION_CATEGORY_ID = 1556268544277225533
-PRIVATE_GROUP_CATEGORY_ID = 1555925845078704228
-ACTIVITY_PROJECT_CATEGORY_ID = 1555925059258810441
-PROTECTED_ROLE_IDS = {1563170216438136996}
+DESTINATION_CATEGORY_ID = required_snowflake("ARCHIVE_CATEGORY_ID")
+PRIVATE_GROUP_CATEGORY_ID = required_snowflake("PRIVATE_GROUP_CATEGORY_ID")
+ACTIVITY_PROJECT_CATEGORY_ID = required_snowflake(
+    "ACTIVITY_PROJECT_CATEGORY_ID"
+)
+PROTECTED_ROLE_IDS = set(required_snowflake_list("PROTECTED_ROLE_IDS"))
 logger = logging.getLogger(__name__)
 
 

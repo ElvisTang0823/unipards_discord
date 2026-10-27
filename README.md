@@ -4,44 +4,111 @@
 
 ## 環境需求
 
-- Python 3.12 或更新版本（需有 `pgembed` 對應作業系統／架構的套件 wheel；本機已驗證 Python 3.14.8／Windows x64 的相依安裝及資料庫 smoke test）
+- Python 3.14.8（需有 `pgembed` 對應作業系統／架構的套件 wheel；已驗證 Windows x64 的相依安裝及資料庫 smoke test）
 - Discord Bot Token
 - 不需預先安裝 PostgreSQL Server 或建立資料庫
 
 ## 安裝與啟動
 
-1. 建立並啟用虛擬環境：
+以下指令適用於 Windows PowerShell，請先切換到專案根目錄（能看到 `main.py` 和 `requirements.txt` 的資料夾）。
+
+1. 確認 Python 版本並建立虛擬環境：
 
    ```powershell
-   py -m venv .venv
-   .\.venv\Scripts\Activate.ps1
+   py -3.14 --version
+   py -3.14 -m venv .venv
    ```
 
-2. 安裝套件：
+   第一個指令必須輸出 `Python 3.14.8`。Bot 只支援這個版本。如果已存在的 `.venv` 是用其他 Python 版本建立的，請先將它改名保留（例如 `.venv-old`），再執行 `py -3.14 -m venv .venv` 建立新的虛擬環境；確認 `.venv-old` 不再需要後，再自行移除備份。
+
+2. 將套件安裝到剛建立的虛擬環境，並確認 `discord.py` 可以匯入：
 
    ```powershell
-   py -m pip install -r requirements.txt
+   .\.venv\Scripts\python.exe --version
+   .\.venv\Scripts\python.exe -m pip install -r .\requirements.txt
+   .\.venv\Scripts\python.exe -c "import discord; print(discord.__version__)"
    ```
 
-3. 複製 `.env.example` 為 `.env`，並填入 Discord Bot Token：
+   第二個指令會依 `requirements.txt` 安裝 Bot 所需的所有套件，包括 `discord.py`。第三個指令應顯示 `discord.py` 版本號；請使用 `.venv\Scripts\python.exe -m pip` 安裝，不要只執行 `pip install`，以免把套件裝到其他 Python 環境。
+
+   若出現 `ModuleNotFoundError: No module named 'discord'`，代表目前啟動 Bot 使用的 Python 環境中尚未安裝 `discord.py`。請在專案根目錄執行：
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m pip install -r .\requirements.txt
+   .\.venv\Scripts\python.exe -c "import discord; print(discord.__version__)"
+   .\.venv\Scripts\python.exe main.py
+   ```
+
+   如果安裝時出現 `No module named pip`，先在同一個虛擬環境安裝 pip，再重試：
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m ensurepip --upgrade
+   .\.venv\Scripts\python.exe -m pip install -r .\requirements.txt
+   ```
+
+   若安裝指令失敗，先確認 `.venv\Scripts\python.exe --version` 顯示 `Python 3.14.8`，並確認安裝指令和啟動指令都使用同一個 `.venv\Scripts\python.exe`。不要用另一個終端機中的全域 `pip` 安裝後，期待虛擬環境能自動找到套件。
+
+3. 建立 `.env`，填入 Discord Bot Token、各項頻道／身分組 ID，以及更新管理員 ID：
+
+   如果你是從 GitHub 下載 ZIP／分支壓縮檔，`.env` 不會包含在下載內容中（它被 Git 忽略，用來避免提交 Token 和私有 ID）。請在專案根目錄執行以下指令建立自己的 `.env`：
+
+   ```powershell
+   Copy-Item .env.example .env
+   notepad .env
+   ```
+
+   將範例值替換成你自己的 Discord Token 和 ID；所有必要 ID 都要填寫，逗號分隔的身分組 ID 也要填完整。`.env.example` 只是欄位範本，不能直接當作已設定好的 `.env` 使用。
 
    ```env
    DISCORD_TOKEN=你的BotToken
+   ARCHIVE_CATEGORY_ID=封存分類ID
+   PRIVATE_GROUP_CATEGORY_ID=私聊群分類ID
+   ACTIVITY_PROJECT_CATEGORY_ID=活動討論群分類ID
+   PROTECTED_ROLE_IDS=受保護身分組ID
+   RSS_CHANNEL_ID=RSS通知頻道ID
+   RSS_ROLE_ID=RSS通知身分組ID
+   ROLE_REQUEST_CHANNEL_ID=入群資料頻道ID
+   ROLE_REQUEST_NOTIFICATION_CHANNEL_ID=管理員通知頻道ID
+   ROLE_REQUEST_ADMIN_ROLE_IDS=管理員身分組ID,另一個管理員身分組ID
+   TEMP_CHANNEL_ENTRY_ID=臨時群組入口頻道ID
+   TEMP_VOICE_TRIGGER_CHANNEL_ID=臨時語音入口頻道ID
+   UPDATE_OWNER_ID=你的Discord使用者ID
+   UPDATE_BRANCH=master
    # Optional: use the hosting provider's PostgreSQL instead of embedded PostgreSQL.
    # DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/DATABASE
    ```
 
    `pip install -r requirements.txt` 會安裝 Psycopg 用戶端與 `pgembed` PostgreSQL Server。未設定 `DATABASE_URL` 時，Bot 會在專案內的 `data/postgres/` 啟動 PostgreSQL 並初始化 schema，不需要預先安裝資料庫或設定連接埠。若託管平台提供 PostgreSQL，請在 `.env` 或平台環境變數設定 `DATABASE_URL`，Bot 會改連該資料庫並初始化所需 schema，不啟動內嵌 PostgreSQL。請勿將含密碼的連線字串提交到版本控制。原 SQLite 資料庫已備份到 `data/backups/bot.sqlite3`，不會匯入新資料庫。
 
+   `.env` 已加入 Git 忽略清單；請只在本機填入實際 ID 與憑證。Bot 僅支援 Python 3.14.8，啟動時會檢查版本。
+
    `data/` 已加入 `.gitignore`，包含 PostgreSQL 資料與舊資料備份，不會隨原始碼提交。打包或複製資料前請先完整停止 Bot；PostgreSQL 原生資料目錄只能在相容作業系統／架構及相同 PostgreSQL 主要版本間直接搬移，跨平台需用 `pg_dump`／還原。線上託管只有在主機提供持久化磁碟，且支援該平台的 `pgembed` wheel 時才適合此模式；暫存磁碟可能在重新部署時清空資料。
 
 4. 在 Discord Developer Portal 的 Bot 設定中啟用 **Message Content Intent**，並邀請 Bot 加入伺服器。
 
-5. 啟動 Bot：
+5. 確認 Python 版本後，使用虛擬環境中的 Python 啟動 Bot：
 
    ```powershell
-   py main.py
+   .\.venv\Scripts\python.exe --version
+   .\.venv\Scripts\python.exe main.py
    ```
+
+   若顯示 `ModuleNotFoundError: No module named 'discord'`，請依本節第 2 步，以同一個 `.venv\Scripts\python.exe` 安裝 `requirements.txt` 後再啟動。
+
+### 本機核准更新與自動重啟
+
+Bot 每小時會從 `origin` 抓取 `.env` 中 `UPDATE_BRANCH` 指定的分支。發現新提交時，會私訊 `UPDATE_OWNER_ID` 顯示審核卡片；只有按下「確認更新」才會檢查工作目錄、以 fast-forward 方式更新程式、安裝 `requirements.txt` 並關閉 Bot。管理員也可私訊 Bot `!update` 立即檢查；這不會略過按鈕核准。拒絕或 15 分鐘內未審核都不會更新。有未提交的本機變更時會中止，不會 stash 或覆寫。
+
+自動更新必須在真正的 Git clone 工作目錄執行；GitHub 的 **Download ZIP／分支壓縮檔不包含 `.git` 資料**，因此 Bot 無法讀取分支、執行 `git fetch` 或更新。ZIP 下載版本仍可手動啟動，但自動更新會停用，私訊 `!update` 會回報此原因。若要使用自動更新，請先停止舊 Bot，從 PowerShell 在要放置專案的目錄執行：
+
+```powershell
+git clone --branch feature/approved-local-updates https://github.com/ElvisTang0823/unipards_discord.git unipards_discord
+Set-Location .\unipards_discord
+```
+
+使用中的更新分支必須同時是本地目前分支及 `.env` 的 `UPDATE_BRANCH`。測試此功能分支時請設定 `UPDATE_BRANCH=feature/approved-local-updates`；功能合併到 `master` 後，若要追蹤正式分支則改為 `UPDATE_BRANCH=master`。從 ZIP 搬到 clone 時，請在舊 Bot 完全停止後，將自己的 `.env` 複製到 clone，並按一般安裝步驟在 clone 重新建立 `.venv`、安裝套件。不要複製舊 `.venv`；若要沿用本機 PostgreSQL 資料，請在 Bot 和 PostgreSQL 都停止後備份並搬移 `data/`，避免覆蓋或遺失現有資料。
+
+更新主機須已設定可讓 Git 非互動式存取 `origin` 的憑證。專案根目錄的 `run_bot.bat` 使用 `.venv` 中的 Python 啟動 Bot，程序結束後等待 3 秒再啟動；更新完成時由此腳本載入新程式。
 
 ### 僅啟動投票功能進行測試
 
@@ -49,23 +116,24 @@
 
 ```powershell
 $env:BOT_COGS = ""
-py main.py
+.\.venv\Scripts\python.exe main.py
 ```
 
 可用空格或逗號指定多個 Cog，例如 `$env:BOT_COGS = "vote info"`。隔離模式只載入並同步所選 Cog 的全域斜線指令，並移除伺服器中與這些指令同名的伺服器專屬版本。請使用獨立的測試 Bot Token；此模式會更新該 Bot Application 的全域斜線指令，Discord 顯示新指令可能需要一些時間。
 若要單獨測試表符報名，請改用 `$env:BOT_COGS = "signup"`。
 若要單獨測試揪團，請使用 `$env:BOT_COGS = "order"`。
 
-清除 `BOT_COGS` 設定後再執行 `py main.py`，則會載入所有功能：
+清除 `BOT_COGS` 設定後再執行 Bot，則會載入所有功能：
 
 ```powershell
 Remove-Item Env:BOT_COGS
-py main.py
+.\.venv\Scripts\python.exe main.py
 ```
 
 ## 目前指令
 
 - `!ping`：回覆 Bot 的延遲。
+- `!update`：指定管理員以私訊檢查更新，並透過確認按鈕核准更新與重啟。
 - `/info`：在伺服器任何頻道讀取 `commands.json` 並以私人回覆分頁顯示可用指令，可透過上一頁／下一頁按鈕翻頁。可提供指令名稱（例如 `/info command:/create-vote`）查詢單一指令的用法與說明。
 - `/create-channel <頻道類型> [頻道名稱]`：在指定建頻入口建立「私聊群」或「活動討論群」。
 - `/create-signup`：建立表符報名活動；建立者自動報名，成員以 ✅ 加入、移除 ✅ 取消，可填寫僅建立者可見的備註，修改時會帶入上次內容。可設定名額上限；超額時由建立者在私訊中挑選錄取者，未於 30 分鐘內完成或無法私訊時依報名順序遞補。截止後直接將原報名卡更新為結果，卡片外提及發起者並顯示「報名「標題」已截止，結果如下：」，並私訊發起者結果公告連結；錄取與候補名單在卡片內提及成員（無候補時不顯示候補卡）；名單每 15 人分頁，卡片按鈕會為每位使用者開啟獨立私人分頁。不限制身分組。活動說明同樣支援實際換行或輸入 `\n`。卡片標題格式為「報名｜{標題}」／「報名結果｜{標題}」，固定使用 `#5765F2`，頁尾統一顯示截止時間與狀態。

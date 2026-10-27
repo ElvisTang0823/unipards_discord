@@ -6,10 +6,13 @@ import re
 import discord
 from discord.ext import commands
 
+from cogs._config import required_snowflake, required_snowflake_list
 
-REQUEST_CHANNEL_ID = 1555919971002089594
-ADMIN_NOTIFICATION_CHANNEL_ID = 1555924672087068682
-ADMIN_ROLE_IDS = (1555921564669579356, 1555920924681965608)
+REQUEST_CHANNEL_ID = required_snowflake("ROLE_REQUEST_CHANNEL_ID")
+ADMIN_NOTIFICATION_CHANNEL_ID = required_snowflake(
+    "ROLE_REQUEST_NOTIFICATION_CHANNEL_ID"
+)
+ADMIN_ROLE_IDS = required_snowflake_list("ROLE_REQUEST_ADMIN_ROLE_IDS")
 ROLE_REQUEST_CARD_FOOTER = "- FRC6998入群資料註冊面板"
 ROLE_NOTIFICATION_PENDING_FOOTER = "unipards:role-notification:v1:pending"
 logger = logging.getLogger(__name__)
