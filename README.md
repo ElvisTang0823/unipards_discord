@@ -10,23 +10,54 @@
 
 ## 安裝與啟動
 
-1. 建立並啟用虛擬環境：
+以下指令適用於 Windows PowerShell，請先切換到專案根目錄（能看到 `main.py` 和 `requirements.txt` 的資料夾）。
+
+1. 確認 Python 版本並建立虛擬環境：
 
    ```powershell
    py -3.14 --version
    py -3.14 -m venv .venv
-   .\.venv\Scripts\Activate.ps1
    ```
 
-   建立前請確認版本輸出為 `Python 3.14.8`。
+   第一個指令必須輸出 `Python 3.14.8`。Bot 只支援這個版本。如果已存在的 `.venv` 是用其他 Python 版本建立的，請先將它改名保留（例如 `.venv-old`），再執行 `py -3.14 -m venv .venv` 建立新的虛擬環境；確認 `.venv-old` 不再需要後，再自行移除備份。
 
-2. 安裝套件：
+2. 將套件安裝到剛建立的虛擬環境，並確認 `discord.py` 可以匯入：
 
    ```powershell
-   python -m pip install -r requirements.txt
+   .\.venv\Scripts\python.exe --version
+   .\.venv\Scripts\python.exe -m pip install -r .\requirements.txt
+   .\.venv\Scripts\python.exe -c "import discord; print(discord.__version__)"
    ```
 
-3. 複製 `.env.example` 為 `.env`，並填入 Discord Bot Token、各項頻道／身分組 ID，以及更新管理員 ID：
+   第二個指令會依 `requirements.txt` 安裝 Bot 所需的所有套件，包括 `discord.py`。第三個指令應顯示 `discord.py` 版本號；請使用 `.venv\Scripts\python.exe -m pip` 安裝，不要只執行 `pip install`，以免把套件裝到其他 Python 環境。
+
+   若出現 `ModuleNotFoundError: No module named 'discord'`，代表目前啟動 Bot 使用的 Python 環境中尚未安裝 `discord.py`。請在專案根目錄執行：
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m pip install -r .\requirements.txt
+   .\.venv\Scripts\python.exe -c "import discord; print(discord.__version__)"
+   .\.venv\Scripts\python.exe main.py
+   ```
+
+   如果安裝時出現 `No module named pip`，先在同一個虛擬環境安裝 pip，再重試：
+
+   ```powershell
+   .\.venv\Scripts\python.exe -m ensurepip --upgrade
+   .\.venv\Scripts\python.exe -m pip install -r .\requirements.txt
+   ```
+
+   若安裝指令失敗，先確認 `.venv\Scripts\python.exe --version` 顯示 `Python 3.14.8`，並確認安裝指令和啟動指令都使用同一個 `.venv\Scripts\python.exe`。不要用另一個終端機中的全域 `pip` 安裝後，期待虛擬環境能自動找到套件。
+
+3. 建立 `.env`，填入 Discord Bot Token、各項頻道／身分組 ID，以及更新管理員 ID：
+
+   如果你是從 GitHub 下載 ZIP／分支壓縮檔，`.env` 不會包含在下載內容中（它被 Git 忽略，用來避免提交 Token 和私有 ID）。請在專案根目錄執行以下指令建立自己的 `.env`：
+
+   ```powershell
+   Copy-Item .env.example .env
+   notepad .env
+   ```
+
+   將範例值替換成你自己的 Discord Token 和 ID；所有必要 ID 都要填寫，逗號分隔的身分組 ID 也要填完整。`.env.example` 只是欄位範本，不能直接當作已設定好的 `.env` 使用。
 
    ```env
    DISCORD_TOKEN=你的BotToken
@@ -55,15 +86,27 @@
 
 4. 在 Discord Developer Portal 的 Bot 設定中啟用 **Message Content Intent**，並邀請 Bot 加入伺服器。
 
-5. 啟動 Bot：
+5. 確認 Python 版本後，使用虛擬環境中的 Python 啟動 Bot：
 
    ```powershell
+   .\.venv\Scripts\python.exe --version
    .\.venv\Scripts\python.exe main.py
    ```
+
+   若顯示 `ModuleNotFoundError: No module named 'discord'`，請依本節第 2 步，以同一個 `.venv\Scripts\python.exe` 安裝 `requirements.txt` 後再啟動。
 
 ### 本機核准更新與自動重啟
 
 Bot 每小時會從 `origin` 抓取 `.env` 中 `UPDATE_BRANCH` 指定的分支。發現新提交時，會私訊 `UPDATE_OWNER_ID` 顯示審核卡片；只有按下「確認更新」才會檢查工作目錄、以 fast-forward 方式更新程式、安裝 `requirements.txt` 並關閉 Bot。管理員也可私訊 Bot `!update` 立即檢查；這不會略過按鈕核准。拒絕或 15 分鐘內未審核都不會更新。有未提交的本機變更時會中止，不會 stash 或覆寫。
+
+自動更新必須在真正的 Git clone 工作目錄執行；GitHub 的 **Download ZIP／分支壓縮檔不包含 `.git` 資料**，因此 Bot 無法讀取分支、執行 `git fetch` 或更新。ZIP 下載版本仍可手動啟動，但自動更新會停用，私訊 `!update` 會回報此原因。若要使用自動更新，請先停止舊 Bot，從 PowerShell 在要放置專案的目錄執行：
+
+```powershell
+git clone --branch feature/approved-local-updates https://github.com/ElvisTang0823/unipards_discord.git unipards_discord
+Set-Location .\unipards_discord
+```
+
+使用中的更新分支必須同時是本地目前分支及 `.env` 的 `UPDATE_BRANCH`。測試此功能分支時請設定 `UPDATE_BRANCH=feature/approved-local-updates`；功能合併到 `master` 後，若要追蹤正式分支則改為 `UPDATE_BRANCH=master`。從 ZIP 搬到 clone 時，請在舊 Bot 完全停止後，將自己的 `.env` 複製到 clone，並按一般安裝步驟在 clone 重新建立 `.venv`、安裝套件。不要複製舊 `.venv`；若要沿用本機 PostgreSQL 資料，請在 Bot 和 PostgreSQL 都停止後備份並搬移 `data/`，避免覆蓋或遺失現有資料。
 
 更新主機須已設定可讓 Git 非互動式存取 `origin` 的憑證。專案根目錄的 `run_bot.bat` 使用 `.venv` 中的 Python 啟動 Bot，程序結束後等待 3 秒再啟動；更新完成時由此腳本載入新程式。
 

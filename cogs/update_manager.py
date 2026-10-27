@@ -25,6 +25,10 @@ class UpdateError(RuntimeError):
     pass
 
 
+class GitCheckoutError(UpdateError):
+    pass
+
+
 @dataclass(frozen=True)
 class UpdateStatus:
     remote_commit: str
@@ -108,6 +112,9 @@ class UpdateManager(commands.Cog):
                     status.remote_commit,
                     retry_dependencies=self._dependencies_pending,
                 )
+        except GitCheckoutError as error:
+            logger.error("Automatic update checks disabled: %s", error)
+            self.check_for_updates.stop()
         except UpdateError:
             logger.exception("Automatic update check failed")
         except discord.HTTPException:
@@ -130,6 +137,9 @@ class UpdateManager(commands.Cog):
         async with ctx.typing():
             try:
                 status = await self.get_update_status()
+            except GitCheckoutError as error:
+                await ctx.send(str(error))
+                return
             except UpdateError:
                 logger.exception("Manual update check failed")
                 await ctx.send(
@@ -154,6 +164,26 @@ class UpdateManager(commands.Cog):
             await ctx.send("已有待審核的更新卡片，請直接使用該卡片。")
 
     async def get_update_status(self) -> UpdateStatus:
+        root_result, repository_root, git_error = await run_process(
+            "git",
+            "rev-parse",
+            "--show-toplevel",
+            timeout=30,
+        )
+        if root_result != 0:
+            detail = f" Git 回報：{git_error}" if git_error else ""
+            raise GitCheckoutError(
+                "目前專案不是 Git 工作目錄，無法使用自動更新。"
+                "請以 `git clone` 下載專案，不要使用 GitHub ZIP；"
+                "或繼續手動啟動，但自動更新功能將無法使用。"
+                + detail
+            )
+        if Path(repository_root).resolve() != BASE_DIR.resolve():
+            raise GitCheckoutError(
+                "Bot 專案資料夾不是 Git 儲存庫根目錄，無法安全自動更新。"
+                "請在 Git clone 出來的專案根目錄啟動 Bot。"
+            )
+
         branch_result, branch, _ = await run_process(
             "git",
             "branch",
@@ -161,7 +191,14 @@ class UpdateManager(commands.Cog):
             timeout=30,
         )
         if branch_result != 0:
-            raise UpdateError("Unable to read the current Git branch")
+            raise GitCheckoutError(
+                "無法讀取目前 Git 分支；請確認 Bot 位於有效的 Git clone 工作目錄。"
+            )
+        if not branch:
+            raise GitCheckoutError(
+                "目前 Git 工作目錄處於 detached HEAD，無法使用自動更新。"
+                "請切換到設定的本地分支後重啟 Bot。"
+            )
         if branch != UPDATE_BRANCH:
             raise UpdateError(
                 f"Bot is on branch {branch!r}, expected {UPDATE_BRANCH!r}"
