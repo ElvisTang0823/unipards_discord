@@ -8,7 +8,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import discord
-from discord import app_commands
 from discord.ext import commands, tasks
 
 from cogs._config import required_snowflake
@@ -163,13 +162,6 @@ class UpdateManager(commands.Cog):
             return
         if not sent:
             await ctx.send("已有待審核的更新卡片，請直接使用該卡片。")
-
-    @app_commands.command(name="test", description="測試自動更新功能是否正常")
-    async def test_update(self, interaction: discord.Interaction) -> None:
-        await interaction.response.send_message(
-            "自動更新程式 OK",
-            ephemeral=True,
-        )
 
     async def get_update_status(self) -> UpdateStatus:
         root_result, repository_root, git_error = await run_process(
