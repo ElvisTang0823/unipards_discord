@@ -3,6 +3,7 @@ import logging
 import math
 import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -328,6 +329,11 @@ class DiscordBot(commands.Bot):
 
 
 async def main() -> None:
+    if sys.version_info[:3] != (3, 14, 8):
+        raise RuntimeError(
+            "This bot requires exactly Python 3.14.8; "
+            f"running {sys.version.split()[0]}."
+        )
     configure_logging()
     token = os.getenv("DISCORD_TOKEN")
     if not token:

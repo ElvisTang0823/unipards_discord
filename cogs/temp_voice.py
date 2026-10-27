@@ -6,10 +6,11 @@ import discord
 from discord.ext import commands
 
 from cogs.channel_permissions import send_permission_guide
+from cogs._config import required_snowflake
 from database import Database, load_channel_owners, save_channel_owners
 
 
-TRIGGER_CHANNEL_ID = 1556272392458735668
+TRIGGER_CHANNEL_ID = required_snowflake("TEMP_VOICE_TRIGGER_CHANNEL_ID")
 logger = logging.getLogger(__name__)
 
 

@@ -12,10 +12,11 @@ import aiohttp
 import discord
 from discord.ext import commands, tasks
 
+from cogs._config import required_snowflake
 
 RSS_URL = "https://community.firstinspires.org/topic/frc/rss.xml"
-TARGET_CHANNEL_ID = 1555919971002089595
-TARGET_ROLE_ID = 1555933526665334977
+TARGET_CHANNEL_ID = required_snowflake("RSS_CHANNEL_ID")
+TARGET_ROLE_ID = required_snowflake("RSS_ROLE_ID")
 POLL_INTERVAL_SECONDS = 60
 MAX_FEED_BYTES = 2 * 1024 * 1024
 FOOTER_PREFIX = "FIRST RSS ID: "

@@ -7,21 +7,22 @@ from discord import app_commands
 from discord.ext import commands
 
 from cogs.channel_permissions import send_permission_guide
+from cogs._config import required_snowflake
 from database import Database, load_channel_owners, save_channel_owners
 
 
-ENTRY_CHANNEL_ID = 1556259986278195280
+ENTRY_CHANNEL_ID = required_snowflake("TEMP_CHANNEL_ENTRY_ID")
 logger = logging.getLogger(__name__)
 CHANNEL_TYPES = {
     "group": {
         "label": "私聊群",
         "suffix": "群組",
-        "category_id": 1555925845078704228,
+        "category_id": required_snowflake("PRIVATE_GROUP_CATEGORY_ID"),
     },
     "discussion": {
         "label": "活動討論群",
         "suffix": "討論",
-        "category_id": 1555925059258810441,
+        "category_id": required_snowflake("ACTIVITY_PROJECT_CATEGORY_ID"),
     },
 }
 
