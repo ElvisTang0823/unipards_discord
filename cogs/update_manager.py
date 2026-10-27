@@ -386,6 +386,11 @@ class UpdateApprovalView(discord.ui.View):
         self.expected_commit = expected_commit
         self.retry_dependencies = retry_dependencies
 
+    def disable_buttons(self) -> None:
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != UPDATE_OWNER_ID:
             await interaction.response.send_message(
@@ -405,7 +410,7 @@ class UpdateApprovalView(discord.ui.View):
         button: discord.ui.Button[UpdateApprovalView],
     ) -> None:
         await interaction.response.defer(ephemeral=True, thinking=True)
-        self.disable_all_items()
+        self.disable_buttons()
         if interaction.message is not None:
             try:
                 await interaction.message.edit(view=self)
@@ -480,7 +485,7 @@ class UpdateApprovalView(discord.ui.View):
         self.manager.dismiss_commit(self.expected_commit)
 
     async def on_timeout(self) -> None:
-        self.disable_all_items()
+        self.disable_buttons()
         if self.message is not None:
             try:
                 await self.message.edit(
