@@ -35,6 +35,7 @@ class Database:
         ] = asyncio.Queue(maxsize=32)
         self.workers: list[asyncio.Task[None]] = []
         self.accepting = False
+        self.closed = False
 
     async def open(self) -> None:
         loop = asyncio.get_running_loop()
@@ -97,15 +98,23 @@ class Database:
             return function(connection, *args, **kwargs)
 
     async def close(self) -> None:
+        if self.closed:
+            return
         self.accepting = False
-        await self.queue.join()
-        for worker in self.workers:
-            worker.cancel()
-        if self.workers:
-            await asyncio.gather(*self.workers, return_exceptions=True)
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(self.executor, self.pool.close)
-        await asyncio.to_thread(self.executor.shutdown, wait=True)
+        try:
+            await self.queue.join()
+        finally:
+            for worker in self.workers:
+                worker.cancel()
+            if self.workers:
+                await asyncio.gather(*self.workers, return_exceptions=True)
+            self.workers.clear()
+            try:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(self.executor, self.pool.close)
+            finally:
+                await asyncio.to_thread(self.executor.shutdown, wait=True)
+                self.closed = True
 
 
 class DatabaseBusyError(psycopg.OperationalError):

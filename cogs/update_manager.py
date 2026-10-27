@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import discord
+from discord import app_commands
 from discord.ext import commands, tasks
 
 from cogs._config import required_snowflake
@@ -84,6 +85,9 @@ class UpdateManager(commands.Cog):
         self._pending_view: UpdateApprovalView | None = None
         self._dependencies_pending = False
         self._dismissed_commit: str | None = None
+        self._loaded_commit: str | None = None
+        self._loaded_branch: str | None = None
+        self._loaded_worktree_clean: bool | None = None
 
     async def cog_load(self) -> None:
         result, _, _ = await run_process(
@@ -95,6 +99,34 @@ class UpdateManager(commands.Cog):
         )
         if result != 0:
             raise RuntimeError("UPDATE_BRANCH is not a valid Git branch name")
+        try:
+            commit_result, commit, _ = await run_process(
+                "git",
+                "rev-parse",
+                "HEAD",
+                timeout=30,
+            )
+            branch_result, branch, _ = await run_process(
+                "git",
+                "branch",
+                "--show-current",
+                timeout=30,
+            )
+            status_result, status, _ = await run_process(
+                "git",
+                "status",
+                "--porcelain",
+                "--untracked-files=normal",
+                timeout=30,
+            )
+            if commit_result == 0:
+                self._loaded_commit = commit
+            if branch_result == 0 and branch:
+                self._loaded_branch = branch
+            if status_result == 0:
+                self._loaded_worktree_clean = not status
+        except UpdateError:
+            logger.exception("Unable to capture the loaded Git version")
         self.check_for_updates.start()
 
     def cog_unload(self) -> None:
@@ -162,6 +194,24 @@ class UpdateManager(commands.Cog):
             return
         if not sent:
             await ctx.send("已有待審核的更新卡片，請直接使用該卡片。")
+
+    @app_commands.command(name="test", description="確認自動更新程式及目前載入版本")
+    async def test_update(self, interaction: discord.Interaction) -> None:
+        details = ["自動更新程式 OK"]
+        if self._loaded_commit is None:
+            details.append("無法取得啟動時載入的 Git commit。")
+        else:
+            details.append(f"啟動時載入版本：`{self._loaded_commit[:12]}`")
+            if self._loaded_branch is not None:
+                details.append(f"分支：`{self._loaded_branch}`")
+            if self._loaded_worktree_clean is True:
+                details.append("啟動時工作目錄：乾淨")
+            elif self._loaded_worktree_clean is False:
+                details.append("啟動時工作目錄：有未提交變更")
+        await interaction.response.send_message(
+            "\n".join(details),
+            ephemeral=True,
+        )
 
     async def get_update_status(self) -> UpdateStatus:
         root_result, repository_root, git_error = await run_process(
