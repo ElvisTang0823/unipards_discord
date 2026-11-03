@@ -14,6 +14,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
+from cogs._config import required_snowflake
 from database import (
     Database,
     DatabaseBusyError,
@@ -36,6 +37,7 @@ CREATE_COMMANDS = {
 }
 
 load_dotenv(BASE_DIR / ".env")
+UPDATE_OWNER_ID = required_snowflake("UPDATE_OWNER_ID")
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +106,9 @@ class RateLimitedCommandTree(app_commands.CommandTree):
             return False
 
         is_create = command.name in CREATE_COMMANDS
+        if is_create and interaction.user.id == UPDATE_OWNER_ID:
+            return True
+
         bucket = "create" if is_create else "commands"
         try:
             allowed, retry_after = await consume_command_rate_limit(

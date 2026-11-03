@@ -11,6 +11,7 @@ from discord.ext import commands
 from cogs._config import required_snowflake, required_snowflake_list
 
 REQUEST_CHANNEL_ID = required_snowflake("ROLE_REQUEST_CHANNEL_ID")
+UPDATE_OWNER_ID = required_snowflake("UPDATE_OWNER_ID")
 ADMIN_NOTIFICATION_CHANNEL_ID = required_snowflake(
     "ROLE_REQUEST_NOTIFICATION_CHANNEL_ID"
 )
@@ -32,7 +33,7 @@ if (
 ):
     raise ValueError(f"Invalid server rules configuration in {RULES_FILE}")
 
-SERVER_RULES_TEXT = "\n".join(rules_data["rules"])
+SERVER_RULES_TEXT = "伺服器規範：\n" + "\n".join(rules_data["rules"])
 if len(SERVER_RULES_TEXT) > 4000:
     raise ValueError(
         f"Server rules exceed the Discord modal text limit in {RULES_FILE}"
@@ -114,16 +115,17 @@ class RoleRequestModal(discord.ui.Modal, title="FRC6998 群組資料註冊"):
             )
             embed.description = "請管理員協助為此成員設定適當的身分組。"
             embed.set_footer(text=ROLE_NOTIFICATION_PENDING_FOOTER)
-            mentions = " ".join(f"<@&{role_id}>" for role_id in ADMIN_ROLE_IDS)
             notification = await channel.send(
                 content=(
-                    f"{mentions} 請協助設定此成員的身分組。"
+                    f"<@{UPDATE_OWNER_ID}> 請協助設定此成員的身分組。"
                     "設定完成後，請對這則通知按下 :white_check_mark: ，"
                     "機器人會將通知更新為已設定完成。"
                 ),
                 embed=embed,
                 allowed_mentions=discord.AllowedMentions(
-                    roles=[discord.Object(id=role_id) for role_id in ADMIN_ROLE_IDS]
+                    everyone=False,
+                    roles=False,
+                    users=[discord.Object(id=UPDATE_OWNER_ID)],
                 ),
             )
             await notification.add_reaction("✅")

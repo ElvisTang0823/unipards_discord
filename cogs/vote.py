@@ -71,7 +71,7 @@ class VoteView(discord.ui.View):
         self.add_item(OpenVoteButton(poll_id, disabled))
 
 
-class VoteSelectionModal(discord.ui.Modal, title="投票／編輯選擇"):
+class VoteSelectionModal(discord.ui.Modal):
     def __init__(
         self,
         cog: Vote,
@@ -80,21 +80,22 @@ class VoteSelectionModal(discord.ui.Modal, title="投票／編輯選擇"):
         max_votes: int,
         selected_indices: list[int],
     ) -> None:
-        super().__init__(timeout=300)
+        super().__init__(title=f"投票／最多勾選 {max_votes} 項", timeout=300)
         self.cog = cog
         self.poll_id = poll_id
         self.max_votes = max_votes
         self.option_checkboxes: list[discord.ui.Checkbox] = []
         for index, option in enumerate(options):
-            checkbox = discord.ui.Checkbox(default=index in selected_indices)
+            checkbox = discord.ui.Checkbox()
             self.option_checkboxes.append(checkbox)
             self.add_item(
                 discord.ui.Label(
-                    text=f"選項 {index + 1}",
-                    description=option,
+                    text=option[:45],
+                    description=option[45:] or None,
                     component=checkbox,
                 )
             )
+            checkbox.default = index in selected_indices
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
         selected_indices = [
@@ -398,11 +399,7 @@ class Vote(commands.Cog):
         voter_id: int,
         selected_indices: list[int],
     ) -> str:
-        poll, selected_indices = await get_vote_poll_and_selection(
-            self.database,
-            poll_id,
-            interaction.user.id,
-        )
+        poll = await get_vote_poll(self.database, poll_id)
         if (
             poll is None
             or poll["status"] != "open"
