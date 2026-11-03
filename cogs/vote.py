@@ -22,8 +22,8 @@ from database import (
     delete_vote_poll,
     get_open_vote_polls,
     get_vote_poll,
+    get_vote_poll_and_selection,
     get_vote_results,
-    get_vote_selection,
     replace_vote_selection,
     set_vote_poll_webhook,
     set_vote_poll_message,
@@ -71,7 +71,7 @@ class VoteView(discord.ui.View):
         self.add_item(OpenVoteButton(poll_id, disabled))
 
 
-class VoteSelectionView(discord.ui.View):
+class VoteSelectionModal(discord.ui.Modal, title="投票／編輯選擇"):
     def __init__(
         self,
         cog: Vote,
@@ -79,55 +79,38 @@ class VoteSelectionView(discord.ui.View):
         options: list[str],
         max_votes: int,
         selected_indices: list[int],
-        user_id: int,
     ) -> None:
-        super().__init__(timeout=600)
+        super().__init__(timeout=300)
         self.cog = cog
         self.poll_id = poll_id
-        self.user_id = user_id
-        self.option_select = discord.ui.Select(
-            placeholder="選擇你要投的選項",
-            min_values=1,
-            max_values=max_votes,
-            options=[
-                discord.SelectOption(
-                    label=option,
-                    value=str(index),
-                    default=index in selected_indices,
+        self.max_votes = max_votes
+        self.option_checkboxes: list[discord.ui.Checkbox] = []
+        for index, option in enumerate(options):
+            checkbox = discord.ui.Checkbox(default=index in selected_indices)
+            self.option_checkboxes.append(checkbox)
+            self.add_item(
+                discord.ui.Label(
+                    text=f"選項 {index + 1}",
+                    description=option,
+                    component=checkbox,
                 )
-                for index, option in enumerate(options)
-            ],
-        )
-        self.option_select.callback = self.on_selection_changed
-        self.add_item(self.option_select)
-        submit_button = discord.ui.Button(
-            label="送出／覆蓋我的選擇",
-            style=discord.ButtonStyle.success,
-        )
-        submit_button.callback = self.submit_selection
-        self.add_item(submit_button)
+            )
 
-    async def on_selection_changed(
-        self,
-        interaction: discord.Interaction,
-    ) -> None:
-        await interaction.response.defer()
-
-    async def submit_selection(
-        self,
-        interaction: discord.Interaction,
-    ) -> None:
-        if interaction.user.id != self.user_id:
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        selected_indices = [
+            index
+            for index, checkbox in enumerate(self.option_checkboxes)
+            if checkbox.value
+        ]
+        if not selected_indices or len(selected_indices) > self.max_votes:
             await interaction.response.send_message(
-                "這份私人投票選單不屬於你。",
+                "請至少選擇一個選項，且不可超過此投票的可選數量。",
                 ephemeral=True,
             )
             return
 
+        await interaction.response.defer(ephemeral=True)
         try:
-            selected_indices = [
-                int(value) for value in self.option_select.values
-            ]
             result = await self.cog.save_selection(
                 self.poll_id,
                 interaction.user.id,
@@ -135,20 +118,20 @@ class VoteSelectionView(discord.ui.View):
             )
         except (psycopg.Error, RuntimeError, TypeError, ValueError):
             logger.exception("Unable to save vote selection for poll %s", self.poll_id)
-            await interaction.response.edit_message(
-                content="目前無法記錄你的投票，請稍後再試。",
-                view=None,
+            await interaction.followup.send(
+                "目前無法記錄你的投票，請稍後再試。",
+                ephemeral=True,
             )
             return
 
         messages = {
-            "saved": "已送出投票；再次開啟選單並送出，可覆蓋你的選擇。",
+            "saved": "已送出投票；再次開啟表單並送出，可覆蓋你的選擇。",
             "closed": "此投票已截止，無法再更改選擇。",
             "invalid": "請至少選擇一個有效選項，且不可超過此投票的可選數量。",
         }
-        await interaction.response.edit_message(
-            content=messages[result],
-            view=None,
+        await interaction.followup.send(
+            messages[result],
+            ephemeral=True,
         )
 
 
@@ -415,7 +398,11 @@ class Vote(commands.Cog):
         voter_id: int,
         selected_indices: list[int],
     ) -> str:
-        poll = await get_vote_poll(self.database, poll_id)
+        poll, selected_indices = await get_vote_poll_and_selection(
+            self.database,
+            poll_id,
+            interaction.user.id,
+        )
         if (
             poll is None
             or poll["status"] != "open"
@@ -443,7 +430,14 @@ class Vote(commands.Cog):
             return
 
         try:
-            poll = await get_vote_poll(self.database, poll_id)
+            poll, selected_indices = await asyncio.wait_for(
+                get_vote_poll_and_selection(
+                    self.database,
+                    poll_id,
+                    interaction.user.id,
+                ),
+                timeout=2.0,
+            )
             if (
                 poll is None
                 or poll["status"] != "open"
@@ -459,11 +453,21 @@ class Vote(commands.Cog):
                 return
 
             options = json.loads(poll["options_json"])
-            selected_indices = await get_vote_selection(
-                self.database,
-                poll_id,
-                interaction.user.id,
+            if (
+                not isinstance(options, list)
+                or not options
+                or len(options) > 5
+                or not all(isinstance(option, str) for option in options)
+                or not 1 <= int(poll["max_votes"]) <= len(options)
+            ):
+                raise ValueError("投票選項或可選數量資料格式錯誤")
+        except TimeoutError:
+            logger.warning("Timed out loading vote selection for poll %s", poll_id)
+            await interaction.response.send_message(
+                "讀取投票資料逾時，請稍後再試。",
+                ephemeral=True,
             )
+            return
         except (psycopg.Error, RuntimeError, TypeError, ValueError):
             logger.exception("Unable to load vote selection for poll %s", poll_id)
             await interaction.response.send_message(
@@ -472,23 +476,19 @@ class Vote(commands.Cog):
             )
             return
 
-        await interaction.response.send_message(
-            "請選擇 1 到 "
-            f"{poll['max_votes']} 個選項，再按「送出／覆蓋我的選擇」。",
-            view=VoteSelectionView(
+        await interaction.response.send_modal(
+            VoteSelectionModal(
                 self,
                 poll_id,
                 options,
                 int(poll["max_votes"]),
                 selected_indices,
-                interaction.user.id,
             ),
-            ephemeral=True,
         )
 
     @app_commands.command(
         name="create-vote",
-        description="建立限時按鈕投票，截止後公布結果",
+        description="建立限時投票，截止後公布結果",
     )
     @app_commands.guild_only()
     @app_commands.describe(

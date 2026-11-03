@@ -460,6 +460,39 @@ def get_vote_poll(
 
 
 @database_operation
+def get_vote_poll_and_selection(
+    connection: psycopg.Connection[Any],
+    poll_id: int,
+    voter_id: int,
+) -> tuple[dict[str, Any] | None, list[int]]:
+    rows = connection.execute(
+        """
+        SELECT poll.*, ballot.option_index
+        FROM vote_polls AS poll
+        LEFT JOIN vote_ballots AS ballot
+            ON ballot.poll_id = poll.id AND ballot.voter_id = %s
+        WHERE poll.id = %s
+        ORDER BY ballot.option_index
+        """,
+        (voter_id, poll_id),
+    ).fetchall()
+    if not rows:
+        return None, []
+
+    poll = {
+        key: value
+        for key, value in rows[0].items()
+        if key != "option_index"
+    }
+    selected_indices = [
+        int(row["option_index"])
+        for row in rows
+        if row["option_index"] is not None
+    ]
+    return poll, selected_indices
+
+
+@database_operation
 def set_vote_poll_message(
     connection: psycopg.Connection[Any],
     poll_id: int,

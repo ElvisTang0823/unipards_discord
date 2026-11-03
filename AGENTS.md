@@ -5,6 +5,7 @@
 - This is a Python 3.12+ Discord bot using discord.py 2.x.
 - Put bot features in `cogs/` and load them through `main.py`.
 - Use `database.py` for embedded PostgreSQL schema and persistence helpers. The PostgreSQL 17 data directory is `data/postgres/`; `bot.database` is the async `Database` pool facade. Do not issue feature queries directly through the pool.
+- Before changing database schemas or persisted data, check compatibility with existing databases and plan idempotent migrations or data transfers that preserve existing records; avoid conflicting schema changes or startup failures that could disconnect the bot, and validate upgrades against existing data.
 - Keep `commands.json` synchronized with user-facing prefix and slash commands.
 
 ## Code Style

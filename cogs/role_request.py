@@ -32,10 +32,10 @@ if (
 ):
     raise ValueError(f"Invalid server rules configuration in {RULES_FILE}")
 
-SERVER_RULES_DESCRIPTION = " ".join(rules_data["rules"])
-if len(SERVER_RULES_DESCRIPTION) > 100:
+SERVER_RULES_TEXT = "\n".join(rules_data["rules"])
+if len(SERVER_RULES_TEXT) > 4000:
     raise ValueError(
-        f"Server rules exceed the Discord modal description limit in {RULES_FILE}"
+        f"Server rules exceed the Discord modal text limit in {RULES_FILE}"
     )
 
 
@@ -52,6 +52,7 @@ async def get_text_channel(
 
 
 class RoleRequestModal(discord.ui.Modal, title="FRC6998 群組資料註冊"):
+    rules_display = discord.ui.TextDisplay(content=SERVER_RULES_TEXT)
     member_name = discord.ui.Label(
         text="姓名",
         component=discord.ui.TextInput(
@@ -62,7 +63,6 @@ class RoleRequestModal(discord.ui.Modal, title="FRC6998 群組資料註冊"):
     )
     rules_agreement = discord.ui.Label(
         text="我願意遵守伺服器規定",
-        description=SERVER_RULES_DESCRIPTION,
         component=discord.ui.Checkbox(),
     )
 
@@ -226,6 +226,7 @@ class RoleRequest(commands.Cog):
             embed = discord.Embed(
                 title="FRC6998 群組資料註冊",
                 description=(
+                    f"{SERVER_RULES_TEXT}\n\n"
                     "請點擊下方按鈕並輸入姓名，"
                     "同意遵守伺服器規定後才能設定暱稱；"
                     "管理員收到通知後會協助設定你的身分組。"
