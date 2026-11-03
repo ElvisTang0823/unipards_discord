@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
+from pathlib import Path
 
 import discord
 from discord.ext import commands
@@ -17,6 +19,25 @@ ROLE_REQUEST_CARD_FOOTER = "- FRC6998入群資料註冊面板"
 ROLE_NOTIFICATION_PENDING_FOOTER = "unipards:role-notification:v1:pending"
 logger = logging.getLogger(__name__)
 
+RULES_FILE = Path(__file__).resolve().parent.parent / "rules.json"
+rules_data = json.loads(RULES_FILE.read_text(encoding="utf-8"))
+if (
+    not isinstance(rules_data, dict)
+    or not isinstance(rules_data.get("rules"), list)
+    or not rules_data["rules"]
+    or any(
+        not isinstance(rule, str) or not rule.strip()
+        for rule in rules_data["rules"]
+    )
+):
+    raise ValueError(f"Invalid server rules configuration in {RULES_FILE}")
+
+SERVER_RULES_DESCRIPTION = " ".join(rules_data["rules"])
+if len(SERVER_RULES_DESCRIPTION) > 100:
+    raise ValueError(
+        f"Server rules exceed the Discord modal description limit in {RULES_FILE}"
+    )
+
 
 async def get_text_channel(
     bot: discord.Client,
@@ -31,15 +52,29 @@ async def get_text_channel(
 
 
 class RoleRequestModal(discord.ui.Modal, title="FRC6998 群組資料註冊"):
-    member_name = discord.ui.TextInput(
-        label="姓名",
-        placeholder="請輸入你的姓名",
-        min_length=1,
-        max_length=80,
+    member_name = discord.ui.Label(
+        text="姓名",
+        component=discord.ui.TextInput(
+            placeholder="請輸入你的姓名",
+            min_length=1,
+            max_length=80,
+        ),
+    )
+    rules_agreement = discord.ui.Label(
+        text="我願意遵守伺服器規定",
+        description=SERVER_RULES_DESCRIPTION,
+        component=discord.ui.Checkbox(),
     )
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
-        name = str(self.member_name.value).strip()
+        if not self.rules_agreement.component.value:
+            await interaction.response.send_message(
+                "請勾選同意遵守伺服器規定，才能設定暱稱。",
+                ephemeral=True,
+            )
+            return
+
+        name = str(self.member_name.component.value).strip()
         if not name:
             await interaction.response.send_message(
                 "姓名不可空白，請重新點擊按鈕填寫。",
@@ -192,6 +227,7 @@ class RoleRequest(commands.Cog):
                 title="FRC6998 群組資料註冊",
                 description=(
                     "請點擊下方按鈕並輸入姓名，"
+                    "同意遵守伺服器規定後才能設定暱稱；"
                     "管理員收到通知後會協助設定你的身分組。"
                 ),
                 color=discord.Color.blurple(),
