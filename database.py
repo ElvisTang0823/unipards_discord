@@ -1399,7 +1399,7 @@ def consume_command_rate_limit(
             SET previous_request_at = command_rate_limits.last_request_at,
                 last_request_at = clock_timestamp()
             WHERE command_rate_limits.last_request_at
-                <= clock_timestamp() - INTERVAL '1 hour'
+                <= clock_timestamp() - INTERVAL '30 minutes'
             RETURNING user_id
             """,
             (user_id, bucket),
@@ -1412,7 +1412,7 @@ def consume_command_rate_limit(
                 0,
                 EXTRACT(
                     EPOCH FROM (
-                        last_request_at + INTERVAL '1 hour'
+                        last_request_at + INTERVAL '30 minutes'
                         - clock_timestamp()
                     )
                 )

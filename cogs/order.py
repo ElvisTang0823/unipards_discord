@@ -405,15 +405,10 @@ class Order(commands.Cog):
             OrderPanelView(self, event_id),
             message_id=panel_message.id,
         )
-        try:
-            await interaction.delete_original_response()
-        except discord.NotFound:
-            pass
-        except (discord.Forbidden, discord.HTTPException):
-            logger.exception(
-                "Unable to remove private success response for order event %s",
-                event_id,
-            )
+        await interaction.followup.send(
+            f"### 已建立揪團「{title_value}」",
+            ephemeral=True,
+        )
 
     @staticmethod
     def create_order_embed(

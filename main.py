@@ -129,7 +129,8 @@ class RateLimitedCommandTree(app_commands.CommandTree):
         if is_create:
             wait_minutes = max(1, math.ceil(retry_after / 60))
             message = (
-                f"建立類指令共用每小時一次的冷卻，請約 {wait_minutes} 分鐘後再試。"
+                f"建立類指令共用每 30 分鐘一次的冷卻，請約 "
+                f"{wait_minutes} 分鐘後再試。"
             )
         else:
             wait_seconds = max(1, math.ceil(retry_after))
