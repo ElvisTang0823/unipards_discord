@@ -22,7 +22,8 @@ async def send_permission_guide(channel: discord.TextChannel | discord.VoiceChan
         description=(
             "請在 Discord 的「編輯頻道 → 權限」管理此頻道的成員與身分組權限。"
             "建立者只有頻道層級「管理權限」，不會獲得「管理頻道」覆寫。"
-            "其他成員及身分組不能透過頻道覆寫取得「管理頻道」權限。"
+            "除機器人外，任何成員或身分組（包含 @everyone）都不能透過"
+            "頻道覆寫取得「管理頻道」權限。"
             "機器人在線時會保護機器人、@everyone 及建立者的權限覆寫；"
             "若被修改，機器人會自動恢復。"
         ),
@@ -207,13 +208,12 @@ class ChannelPermissions(commands.Cog):
         channel: discord.TextChannel | discord.VoiceChannel,
         owner_id: int,
     ) -> bool:
-        protected_ids = {
-            target.id for target in self.protected_targets(channel, owner_id)
-        }
+        bot_member = channel.guild.me
+        bot_id = bot_member.id if bot_member is not None else None
         succeeded = True
         for target, current_overwrite in list(channel.overwrites.items()):
             if (
-                target.id in protected_ids
+                target.id == bot_id
                 or current_overwrite.manage_channels is not True
             ):
                 continue
@@ -312,6 +312,7 @@ class ChannelPermissions(commands.Cog):
                     target_id,
                 )
 
+        await self.ensure_owner_permissions(after, owner_id)
         await self.remove_other_manage_channel_grants(after, owner_id)
 
     @commands.Cog.listener()
