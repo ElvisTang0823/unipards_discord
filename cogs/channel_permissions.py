@@ -4,8 +4,8 @@ import psycopg
 import discord
 from discord.ext import commands
 
-from cogs._config import required_snowflake, required_snowflake_list
-from database import Database, load_all_channel_owners
+from cogs._config import required_snowflake
+from database import load_all_channel_owners
 
 
 DESTINATION_CATEGORY_ID = required_snowflake("ARCHIVE_CATEGORY_ID")
@@ -13,43 +13,23 @@ PRIVATE_GROUP_CATEGORY_ID = required_snowflake("PRIVATE_GROUP_CATEGORY_ID")
 ACTIVITY_PROJECT_CATEGORY_ID = required_snowflake(
     "ACTIVITY_PROJECT_CATEGORY_ID"
 )
-PROTECTED_ROLE_IDS = set(required_snowflake_list("PROTECTED_ROLE_IDS"))
 logger = logging.getLogger(__name__)
 
 
 async def send_permission_guide(channel: discord.TextChannel | discord.VoiceChannel):
     embed = discord.Embed(
-        title="頻道權限指令",
+        title="頻道管理方式",
         description=(
-            "只有此頻道的建立者可以使用以下指令。對象可使用成員標註、"
-            "身分組標註，或輸入 `everyone` 代表所有人。"
+            "請在 Discord 的「編輯頻道 → 權限」管理此頻道的成員與身分組權限。"
+            "建立者只有頻道層級「管理權限」，不會獲得「管理頻道」覆寫。"
+            "機器人在線時會保護機器人、@everyone 及建立者的權限覆寫；"
+            "若被修改，機器人會自動恢復。"
         ),
         color=discord.Color.blurple(),
     )
     embed.add_field(
-        name="`!allow <對象>`",
-        value=(
-            "文字頻道：允許瀏覽及發言。\n"
-            "語音頻道：允許瀏覽；其他語音權限維持原設定。"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="`!deny <對象>`",
-        value=(
-            "文字頻道：拒絕瀏覽及發言。\n"
-            "語音頻道：拒絕瀏覽；其他語音權限維持原設定。"
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="`!reset <對象>`",
-        value="清除本功能設定的權限，恢復繼承頻道或身分組設定。",
-        inline=False,
-    )
-    embed.add_field(
-        name="`!list`",
-        value="列出此頻道明確允許瀏覽的成員、身分組及其發言／連線權限。",
+        name="`!rename <頻道名稱>`",
+        value="只有頻道建立者可以變更此頻道名稱。",
         inline=False,
     )
     embed.add_field(
@@ -69,54 +49,218 @@ async def send_permission_guide(channel: discord.TextChannel | discord.VoiceChan
         return
 
     try:
-        await message.pin(reason="釘選自動生成頻道的權限指令說明")
+        await message.pin(reason="釘選自動生成頻道的管理方式說明")
     except (discord.Forbidden, discord.HTTPException):
-        logger.exception("Unable to pin permission guide in channel %s", channel.id)
+        logger.exception("Unable to pin channel guide in channel %s", channel.id)
 
 
 class ChannelPermissions(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.protected_overwrites: dict[
+            int, dict[int, discord.PermissionOverwrite]
+        ] = {}
 
-    async def ensure_bot_message_access(
+    def get_managed_owner(self, channel: discord.abc.GuildChannel) -> int | None:
+        cog_name = (
+            "TempVoice"
+            if isinstance(channel, discord.VoiceChannel)
+            else "TemporaryGroups"
+        )
+        owner_cog = self.bot.get_cog(cog_name)
+        managed_channels = getattr(owner_cog, "managed_channels", None)
+        if not isinstance(managed_channels, dict):
+            return None
+        owner_id = managed_channels.get(channel.id)
+        return owner_id if isinstance(owner_id, int) else None
+
+    def protected_targets(
+        self,
+        channel: discord.abc.GuildChannel,
+        owner_id: int,
+    ) -> tuple[discord.Role | discord.Member | discord.Object, ...]:
+        bot_member = channel.guild.me
+        owner = channel.guild.get_member(owner_id) or discord.Object(id=owner_id)
+        if bot_member is None:
+            return (channel.guild.default_role, owner)
+        return (bot_member, channel.guild.default_role, owner)
+
+    def prepare_protected_overwrites(
         self,
         channel: discord.TextChannel | discord.VoiceChannel,
-    ) -> bool:
+        owner_id: int,
+    ) -> None:
+        expected = {
+            target.id: channel.overwrites_for(target)
+            for target in self.protected_targets(channel, owner_id)
+        }
+        owner = channel.guild.get_member(owner_id) or discord.Object(id=owner_id)
+        owner_overwrite = channel.overwrites_for(owner)
+        owner_permissions = (
+            ("view_channel", "send_messages", "read_message_history")
+            if isinstance(channel, discord.TextChannel)
+            else ("view_channel", "connect")
+        )
+        for permission in owner_permissions:
+            setattr(owner_overwrite, permission, True)
+        owner_overwrite.manage_permissions = True
+        owner_overwrite.manage_channels = False
+        expected[owner_id] = owner_overwrite
+
+        bot_member = channel.guild.me
+        if bot_member is not None:
+            bot_overwrite = channel.overwrites_for(bot_member)
+            bot_permissions = ["view_channel", "manage_channels"]
+            if isinstance(channel, discord.TextChannel):
+                bot_permissions.extend(("send_messages", "read_message_history"))
+            else:
+                bot_permissions.extend(("connect", "move_members"))
+            for permission in bot_permissions:
+                setattr(bot_overwrite, permission, True)
+            expected[bot_member.id] = bot_overwrite
+
+        self.protected_overwrites[channel.id] = expected
+
+    async def ensure_owner_permissions(
+        self,
+        channel: discord.TextChannel | discord.VoiceChannel,
+        owner_id: int,
+    ) -> None:
+        owner = channel.guild.get_member(owner_id) or discord.Object(id=owner_id)
+        overwrite = channel.overwrites_for(owner)
+        required_permissions = (
+            ("view_channel", "send_messages", "read_message_history")
+            if isinstance(channel, discord.TextChannel)
+            else ("view_channel", "connect")
+        )
+        changed = False
+        for permission in required_permissions:
+            if getattr(overwrite, permission) is not True:
+                setattr(overwrite, permission, True)
+                changed = True
+        if overwrite.manage_permissions is not True:
+            overwrite.manage_permissions = True
+            changed = True
+        if overwrite.manage_channels is not False:
+            overwrite.manage_channels = False
+            changed = True
+        if not changed:
+            return
+
+        try:
+            await channel.set_permissions(
+                owner,
+                overwrite=overwrite,
+                reason="確保頻道建立者只有頻道層級管理權限",
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            logger.exception(
+                "Unable to ensure owner permissions for generated channel %s",
+                channel.id,
+            )
+
+    async def ensure_bot_permissions(
+        self,
+        channel: discord.TextChannel | discord.VoiceChannel,
+    ) -> None:
         bot_member = channel.guild.me
         if bot_member is None:
             logger.error(
-                "Cannot confirm bot member permissions in channel %s",
+                "Cannot confirm bot permissions in generated channel %s",
                 channel.id,
             )
-            return False
+            return
 
         overwrite = channel.overwrites_for(bot_member)
-        required_permissions = ("view_channel", "send_messages", "read_message_history")
-        if all(getattr(overwrite, permission) is True for permission in required_permissions):
-            return True
-
+        required_permissions = ["view_channel", "manage_channels"]
+        if isinstance(channel, discord.TextChannel):
+            required_permissions.extend(("send_messages", "read_message_history"))
+        else:
+            required_permissions.extend(("connect", "move_members"))
+        changed = False
         for permission in required_permissions:
-            setattr(overwrite, permission, True)
+            if getattr(overwrite, permission) is not True:
+                setattr(overwrite, permission, True)
+                changed = True
+        if not changed:
+            return
 
         try:
             await channel.set_permissions(
                 bot_member,
                 overwrite=overwrite,
-                reason="確保 Bot 可回覆頻道權限指令",
+                reason="確保機器人可管理自動建立頻道",
             )
-        except discord.Forbidden:
+        except (discord.Forbidden, discord.HTTPException):
             logger.exception(
-                "Bot cannot grant itself message access in channel %s",
+                "Unable to ensure bot permissions for generated channel %s",
                 channel.id,
             )
-            return False
-        except discord.HTTPException:
-            logger.exception(
-                "Unable to ensure bot message access in channel %s",
-                channel.id,
-            )
-            return False
-        return True
+
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        for cog_name in ("TemporaryGroups",):
+            owner_cog = self.bot.get_cog(cog_name)
+            managed_channels = getattr(owner_cog, "managed_channels", None)
+            if not isinstance(managed_channels, dict):
+                continue
+            for channel_id, owner_id in list(managed_channels.items()):
+                channel = self.bot.get_channel(channel_id)
+                if not isinstance(
+                    channel,
+                    (discord.TextChannel, discord.VoiceChannel),
+                ):
+                    continue
+                self.prepare_protected_overwrites(channel, owner_id)
+                await self.ensure_owner_permissions(channel, owner_id)
+                await self.ensure_bot_permissions(channel)
+
+    @commands.Cog.listener()
+    async def on_guild_channel_update(
+        self,
+        before: discord.abc.GuildChannel,
+        after: discord.abc.GuildChannel,
+    ) -> None:
+        if not isinstance(after, (discord.TextChannel, discord.VoiceChannel)):
+            return
+        owner_id = self.get_managed_owner(after)
+        if owner_id is None:
+            return
+
+        expected = self.protected_overwrites.setdefault(
+            after.id,
+            {
+                target.id: before.overwrites_for(target)
+                for target in self.protected_targets(before, owner_id)
+            },
+        )
+        targets = {
+            target.id: target
+            for target in self.protected_targets(after, owner_id)
+        }
+        for target_id, overwrite in expected.items():
+            target = targets.get(target_id)
+            if target is None or after.overwrites_for(target) == overwrite:
+                continue
+            try:
+                await after.set_permissions(
+                    target,
+                    overwrite=None if overwrite.is_empty() else overwrite,
+                    reason="恢復自動建立頻道受保護對象的權限",
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                logger.exception(
+                    "Unable to restore protected overwrite for channel %s target %s",
+                    after.id,
+                    target_id,
+                )
+
+    @commands.Cog.listener()
+    async def on_guild_channel_delete(
+        self,
+        channel: discord.abc.GuildChannel,
+    ) -> None:
+        self.protected_overwrites.pop(channel.id, None)
 
     async def restore_owner_tracking(
         self,
@@ -132,7 +276,11 @@ class ChannelPermissions(commands.Cog):
     async def stop_tracking(
         self, channel: discord.TextChannel | discord.VoiceChannel
     ) -> tuple[commands.Cog, int] | None:
-        cog_name = "TempVoice" if isinstance(channel, discord.VoiceChannel) else "TemporaryGroups"
+        cog_name = (
+            "TempVoice"
+            if isinstance(channel, discord.VoiceChannel)
+            else "TemporaryGroups"
+        )
         owner_cog = self.bot.get_cog(cog_name)
         managed_channels = getattr(owner_cog, "managed_channels", None)
         save_ownership = getattr(owner_cog, "save_ownership", None)
@@ -146,6 +294,7 @@ class ChannelPermissions(commands.Cog):
             managed_channels[channel.id] = owner_id
             await save_ownership()
             return None
+        self.protected_overwrites.pop(channel.id, None)
         return owner_cog, owner_id
 
     async def load_owners(self) -> dict[int, int] | None:
@@ -177,227 +326,48 @@ class ChannelPermissions(commands.Cog):
             await ctx.send("此頻道不是由自動建頻道功能建立的頻道。")
             return None
         if owner_id != ctx.author.id:
-            await ctx.send("只有此頻道的建立者可以調整權限。")
+            await ctx.send("只有此頻道的建立者可以使用此指令。")
             return None
         return channel
 
-    async def resolve_target(
-        self, ctx: commands.Context, target_text: str
-    ) -> discord.Member | discord.Role:
-        if target_text.casefold() in {"everyone", "@everyone"}:
-            return ctx.guild.default_role
-
-        try:
-            return await commands.MemberConverter().convert(ctx, target_text)
-        except commands.BadArgument:
-            try:
-                return await commands.RoleConverter().convert(ctx, target_text)
-            except commands.BadArgument as error:
-                raise commands.BadArgument(
-                    "請標註一位成員或身分組，或使用 `everyone`。"
-                ) from error
-
-    async def update_access(
-        self, ctx: commands.Context, target_text: str, action: str
-    ):
+    @commands.command(name="rename")
+    async def rename_channel(self, ctx: commands.Context, *, name: str):
         channel = await self.get_owned_channel(ctx)
         if channel is None:
             return
 
-        try:
-            target = await self.resolve_target(ctx, target_text)
-        except commands.BadArgument as error:
-            await ctx.send(str(error))
+        name = name.strip()
+        if not name or len(name) > 100:
+            await ctx.send("頻道名稱需為 1 到 100 個字元。")
             return
 
-        if isinstance(target, discord.Member) and target.id in {
-            ctx.author.id,
-            self.bot.user.id if self.bot.user is not None else None,
-        }:
-            await ctx.send("不能變更自己的頻道存取權，也不能移除 Bot 的存取權。")
+        bot_member = ctx.guild.me if ctx.guild is not None else None
+        if bot_member is None or not channel.permissions_for(
+            bot_member
+        ).manage_channels:
+            await ctx.send("Bot 在此頻道需要「管理頻道」權限才能變更名稱。")
             return
-
-        if (
-            isinstance(target, discord.Role)
-            and target.id in PROTECTED_ROLE_IDS
-            and action in {"deny", "reset"}
-        ):
-            await ctx.send("此身分組受到保護，不能透過頻道權限指令移除或重設其存取權。")
-            return
-
-        if not await self.ensure_bot_message_access(channel):
-            try:
-                await ctx.author.send(
-                    f"無法在 <#{channel.id}> 確保 Bot 的發言權限，"
-                    "因此沒有執行這次權限變更。請管理員檢查 Bot 的頻道權限。"
-                )
-            except (discord.Forbidden, discord.HTTPException):
-                logger.exception(
-                    "Unable to notify channel owner %s about bot access failure",
-                    ctx.author.id,
-                )
-            return
-
-        is_voice = isinstance(channel, discord.VoiceChannel)
-        permission_names = ("view_channel",) if is_voice else (
-            "view_channel",
-            "send_messages",
-        )
-        overwrite = channel.overwrites_for(target)
-        if action == "reset":
-            for permission in permission_names:
-                setattr(overwrite, permission, None)
-            overwrite_value = None if overwrite.is_empty() else overwrite
-        else:
-            allowed = action == "allow"
-            for permission in permission_names:
-                setattr(overwrite, permission, allowed)
-            overwrite_value = overwrite
 
         try:
-            await channel.set_permissions(
-                target,
-                overwrite=overwrite_value,
-                reason=f"{ctx.author} 使用頻道權限指令 {action}",
-            )
+            await channel.edit(name=name, reason=f"{ctx.author} 使用 !rename")
         except discord.Forbidden:
-            await ctx.send(
-                "權限更新失敗。請確認 Bot 具有伺服器層級的「管理身分組」權限，"
-                "且頻道未拒絕 Bot 存取。"
-            )
+            logger.exception("Bot cannot rename generated channel %s", channel.id)
+            await ctx.send("頻道名稱變更失敗，請檢查 Bot 的頻道權限。")
             return
-        except discord.HTTPException as error:
-            logger.exception("Unable to update permissions for channel %s", channel.id)
-            await ctx.send("Discord 暫時無法更新頻道權限，請稍後再試。")
-            return
-        except (TypeError, ValueError) as error:
-            logger.exception("Invalid permission overwrite for channel %s", channel.id)
-            await ctx.send("權限設定格式不正確，沒有變更頻道權限。")
+        except discord.HTTPException:
+            logger.exception("Unable to rename generated channel %s", channel.id)
+            await ctx.send("Discord 暫時無法變更頻道名稱，請稍後再試。")
             return
 
-        if action == "allow":
-            result = "設為允許瀏覽" if is_voice else "設為允許瀏覽及發言"
-        elif action == "deny":
-            result = "設為拒絕瀏覽" if is_voice else "設為拒絕瀏覽及發言"
-        else:
-            result = "恢復預設設定"
-
-        if target == ctx.guild.default_role:
-            target_name = "所有人"
-        elif isinstance(target, discord.Member):
-            target_name = target.display_name
-        else:
-            target_name = target.name
         try:
-            await channel.send(
-                f"> ### :loudspeaker: 已經將 {target_name} {result}。",
+            await ctx.send(
+                f"已將頻道名稱變更為「{name}」。",
                 allowed_mentions=discord.AllowedMentions.none(),
             )
-        except (discord.Forbidden, discord.HTTPException) as error:
-            print(f"無法在頻道 {channel.id} 發送權限更新摘要：{error}")
-
-    @commands.command(name="allow")
-    async def allow_access(self, ctx: commands.Context, *, target: str):
-        await self.update_access(ctx, target, "allow")
-
-    @commands.command(name="deny")
-    async def deny_access(self, ctx: commands.Context, *, target: str):
-        await self.update_access(ctx, target, "deny")
-
-    @commands.command(name="reset")
-    async def reset_access(self, ctx: commands.Context, *, target: str = ""):
-        if not target.strip():
-            await ctx.send(
-                "請指定要重設的成員、身分組或 `everyone`。"
-                "例如：`!reset @成員`。"
-            )
-            return
-        await self.update_access(ctx, target, "reset")
-
-    @commands.command(name="list")
-    async def list_access(self, ctx: commands.Context) -> None:
-        channel = await self.get_owned_channel(ctx)
-        if channel is None or ctx.guild is None:
-            return
-
-        allowed_entries: list[str] = []
-        denied_entries: list[str] = []
-        for target, overwrite in channel.overwrites.items():
-            if overwrite.view_channel not in {True, False}:
-                continue
-
-            if target == ctx.guild.default_role:
-                target_name = "@everyone"
-            elif isinstance(target, discord.Member):
-                target_name = f"@{target.display_name}"
-            elif isinstance(target, discord.Role):
-                target_name = f"@{target.name}"
-            else:
-                target_name = f"ID {target.id}"
-            target_name = target_name.replace("`", "\\`")
-
-            if overwrite.view_channel is False:
-                access = (
-                    "拒絕瀏覽及連線"
-                    if isinstance(channel, discord.VoiceChannel)
-                    else "拒絕瀏覽及發言"
-                )
-                denied_entries.append(f"`{target_name}`：{access}")
-                continue
-
-            if isinstance(channel, discord.VoiceChannel):
-                if overwrite.connect is True:
-                    access = "可瀏覽並連線"
-                elif overwrite.connect is False:
-                    access = "可瀏覽，不可連線"
-                else:
-                    access = "可瀏覽；連線權限依繼承設定"
-            elif overwrite.send_messages is True:
-                access = "可瀏覽並發言"
-            elif overwrite.send_messages is False:
-                access = "可瀏覽，不可發言"
-            else:
-                access = "可瀏覽；發言權限依繼承設定"
-
-            allowed_entries.append(f"`{target_name}`：{access}")
-
-        if not allowed_entries:
-            allowed_entries = ["目前沒有明確允許瀏覽的成員或身分組。"]
-        if not denied_entries:
-            denied_entries = ["目前沒有明確拒絕瀏覽的成員或身分組。"]
-
-        entries = [
-            "**明確允許**",
-            *allowed_entries,
-            "",
-            "**明確拒絕（包含使用 `!deny` 拒絕的對象）**",
-            *denied_entries,
-        ]
-
-        pages: list[list[str]] = [[]]
-        page_length = 0
-        for entry in entries:
-            if pages[-1] and page_length + len(entry) + 1 > 3800:
-                pages.append([])
-                page_length = 0
-            pages[-1].append(entry)
-            page_length += len(entry) + 1
-
-        for page_number, entries in enumerate(pages, start=1):
-            title = f"{channel.name} 的頻道權限"
-            if len(pages) > 1:
-                title += f"（{page_number}/{len(pages)}）"
-            embed = discord.Embed(
-                title=title,
-                description="\n".join(entries),
-                color=discord.Color.blurple(),
-            )
-            embed.set_footer(
-                text="依目前頻道權限覆寫列出允許與拒絕對象。"
-            )
-            await ctx.send(
-                embed=embed,
-                allowed_mentions=discord.AllowedMentions.none(),
+        except (discord.Forbidden, discord.HTTPException):
+            logger.exception(
+                "Channel %s was renamed, but the confirmation could not be sent",
+                channel.id,
             )
 
     @commands.command(name="close")

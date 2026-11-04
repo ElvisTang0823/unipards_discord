@@ -106,6 +106,17 @@ class TemporaryGroups(commands.Cog):
             )
             return
 
+        bot_member = interaction.guild.me
+        if bot_member is None or not (
+            bot_member.guild_permissions.manage_roles
+            or bot_member.guild_permissions.administrator
+        ):
+            await interaction.response.send_message(
+                "機器人需要伺服器層級的「管理身分組」權限，才能授予建立者頻道的「管理權限」。",
+                ephemeral=True,
+            )
+            return
+
         name = (
             channel_name
             or f"{interaction.user.display_name}-{channel_config['suffix']}"
@@ -125,20 +136,19 @@ class TemporaryGroups(commands.Cog):
         owner_overwrite.view_channel = True
         owner_overwrite.send_messages = True
         owner_overwrite.read_message_history = True
-        owner_overwrite.manage_channels = True
+        owner_overwrite.manage_permissions = True
+        owner_overwrite.manage_channels = False
         overwrites[interaction.user] = owner_overwrite
 
-        bot_member = interaction.guild.me
-        if bot_member is not None:
-            bot_overwrite = overwrites.get(
-                bot_member,
-                discord.PermissionOverwrite(),
-            )
-            bot_overwrite.view_channel = True
-            bot_overwrite.send_messages = True
-            bot_overwrite.read_message_history = True
-            bot_overwrite.manage_channels = True
-            overwrites[bot_member] = bot_overwrite
+        bot_overwrite = overwrites.get(
+            bot_member,
+            discord.PermissionOverwrite(),
+        )
+        bot_overwrite.view_channel = True
+        bot_overwrite.send_messages = True
+        bot_overwrite.read_message_history = True
+        bot_overwrite.manage_channels = True
+        overwrites[bot_member] = bot_overwrite
 
         await interaction.response.defer(ephemeral=True)
         try:

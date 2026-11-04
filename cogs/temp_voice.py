@@ -72,13 +72,11 @@ class TempVoice(commands.Cog):
         overwrite.connect = True
         overwrite.move_members = True
         overwrite.manage_channels = True
-        overwrite.manage_permissions = None
         if (
             channel.overwrites_for(bot_member).view_channel is True
             and channel.overwrites_for(bot_member).connect is True
             and channel.overwrites_for(bot_member).move_members is True
             and channel.overwrites_for(bot_member).manage_channels is True
-            and channel.overwrites_for(bot_member).manage_permissions is None
         ):
             return
 
@@ -98,23 +96,19 @@ class TempVoice(commands.Cog):
         self, channel: discord.VoiceChannel, owner: discord.Member
     ):
         overwrite = channel.overwrites_for(owner)
-        bot_member = channel.guild.me
-        can_manage_overwrites = (
-            bot_member is not None and bot_member.guild_permissions.administrator
-        )
-        manage_permissions = True if can_manage_overwrites else None
         required_permissions = (
             "view_channel",
             "connect",
-            "manage_channels",
         )
         if (
             all(getattr(overwrite, permission) is True for permission in required_permissions)
-            and overwrite.manage_permissions is manage_permissions
+            and overwrite.manage_permissions is True
+            and overwrite.manage_channels is False
         ):
             return
 
-        overwrite.manage_permissions = manage_permissions
+        overwrite.manage_permissions = True
+        overwrite.manage_channels = False
         for permission in required_permissions:
             setattr(overwrite, permission, True)
         try:
@@ -176,18 +170,23 @@ class TempVoice(commands.Cog):
             )
             return
 
+        if not (
+            bot_member.guild_permissions.manage_roles
+            or bot_member.guild_permissions.administrator
+        ):
+            logger.error(
+                "Unable to create voice channel for member %s: bot needs the "
+                "Manage Roles server permission to grant channel Manage Permissions",
+                member.id,
+            )
+            return
+
         owner_overwrite = discord.PermissionOverwrite(
             view_channel=True,
             connect=True,
-            manage_channels=True,
+            manage_permissions=True,
+            manage_channels=False,
         )
-        if bot_member.guild_permissions.administrator:
-            owner_overwrite.manage_permissions = True
-        else:
-            logger.warning(
-                "Bot 不是伺服器管理員，因此無法授予建立者頻道的「管理權限」；"
-                "個人語音頻道仍會建立，建立者可管理頻道名稱與設定。"
-            )
 
         overwrites = {
             member.guild.default_role: discord.PermissionOverwrite(
@@ -271,6 +270,14 @@ class TempVoice(commands.Cog):
                             channel.id,
                         )
                         continue
+                permissions_cog = self.bot.get_cog("ChannelPermissions")
+                prepare_overwrites = getattr(
+                    permissions_cog,
+                    "prepare_protected_overwrites",
+                    None,
+                )
+                if callable(prepare_overwrites):
+                    prepare_overwrites(channel, owner_id)
                 if owner is not None:
                     await self.ensure_owner_access(channel, owner)
                 await self.ensure_bot_access(channel)

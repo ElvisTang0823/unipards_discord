@@ -92,7 +92,7 @@ class Info(commands.Cog):
 
     @app_commands.command(name="info", description="查看可用指令或查詢單一指令用法")
     @app_commands.guild_only()
-    @app_commands.describe(command="要查詢的指令，例如 /create-vote 或 !allow")
+    @app_commands.describe(command="要查詢的指令，例如 /create-vote 或 !rename")
     async def info(
         self,
         interaction: discord.Interaction,
