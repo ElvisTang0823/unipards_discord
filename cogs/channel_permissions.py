@@ -22,6 +22,7 @@ async def send_permission_guide(channel: discord.TextChannel | discord.VoiceChan
         description=(
             "請在 Discord 的「編輯頻道 → 權限」管理此頻道的成員與身分組權限。"
             "建立者只有頻道層級「管理權限」，不會獲得「管理頻道」覆寫。"
+            "其他成員及身分組不能透過頻道覆寫取得「管理頻道」權限。"
             "機器人在線時會保護機器人、@everyone 及建立者的權限覆寫；"
             "若被修改，機器人會自動恢復。"
         ),
@@ -125,7 +126,7 @@ class ChannelPermissions(commands.Cog):
         self,
         channel: discord.TextChannel | discord.VoiceChannel,
         owner_id: int,
-    ) -> None:
+    ) -> bool:
         owner = channel.guild.get_member(owner_id) or discord.Object(id=owner_id)
         overwrite = channel.overwrites_for(owner)
         required_permissions = (
@@ -145,7 +146,7 @@ class ChannelPermissions(commands.Cog):
             overwrite.manage_channels = False
             changed = True
         if not changed:
-            return
+            return True
 
         try:
             await channel.set_permissions(
@@ -158,18 +159,20 @@ class ChannelPermissions(commands.Cog):
                 "Unable to ensure owner permissions for generated channel %s",
                 channel.id,
             )
+            return False
+        return True
 
     async def ensure_bot_permissions(
         self,
         channel: discord.TextChannel | discord.VoiceChannel,
-    ) -> None:
+    ) -> bool:
         bot_member = channel.guild.me
         if bot_member is None:
             logger.error(
                 "Cannot confirm bot permissions in generated channel %s",
                 channel.id,
             )
-            return
+            return False
 
         overwrite = channel.overwrites_for(bot_member)
         required_permissions = ["view_channel", "manage_channels"]
@@ -183,7 +186,7 @@ class ChannelPermissions(commands.Cog):
                 setattr(overwrite, permission, True)
                 changed = True
         if not changed:
-            return
+            return True
 
         try:
             await channel.set_permissions(
@@ -196,6 +199,62 @@ class ChannelPermissions(commands.Cog):
                 "Unable to ensure bot permissions for generated channel %s",
                 channel.id,
             )
+            return False
+        return True
+
+    async def remove_other_manage_channel_grants(
+        self,
+        channel: discord.TextChannel | discord.VoiceChannel,
+        owner_id: int,
+    ) -> bool:
+        protected_ids = {
+            target.id for target in self.protected_targets(channel, owner_id)
+        }
+        succeeded = True
+        for target, current_overwrite in list(channel.overwrites.items()):
+            if (
+                target.id in protected_ids
+                or current_overwrite.manage_channels is not True
+            ):
+                continue
+
+            overwrite = discord.PermissionOverwrite.from_pair(
+                *current_overwrite.pair()
+            )
+            overwrite.manage_channels = False
+            try:
+                await channel.set_permissions(
+                    target,
+                    overwrite=overwrite,
+                    reason="禁止在自動建立頻道授予其他對象管理頻道權限",
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                logger.exception(
+                    "Unable to remove Manage Channels from generated channel %s "
+                    "target %s",
+                    channel.id,
+                    target.id,
+                )
+                succeeded = False
+        return succeeded
+
+    async def enforce_channel_permission_policy(
+        self,
+        channel: discord.TextChannel | discord.VoiceChannel,
+        owner_id: int,
+    ) -> bool:
+        self.prepare_protected_overwrites(channel, owner_id)
+        owner_permissions_set = await self.ensure_owner_permissions(channel, owner_id)
+        bot_permissions_set = await self.ensure_bot_permissions(channel)
+        other_grants_removed = await self.remove_other_manage_channel_grants(
+            channel,
+            owner_id,
+        )
+        return (
+            owner_permissions_set
+            and bot_permissions_set
+            and other_grants_removed
+        )
 
     @commands.Cog.listener()
     async def on_ready(self) -> None:
@@ -211,9 +270,7 @@ class ChannelPermissions(commands.Cog):
                     (discord.TextChannel, discord.VoiceChannel),
                 ):
                     continue
-                self.prepare_protected_overwrites(channel, owner_id)
-                await self.ensure_owner_permissions(channel, owner_id)
-                await self.ensure_bot_permissions(channel)
+                await self.enforce_channel_permission_policy(channel, owner_id)
 
     @commands.Cog.listener()
     async def on_guild_channel_update(
@@ -254,6 +311,8 @@ class ChannelPermissions(commands.Cog):
                     after.id,
                     target_id,
                 )
+
+        await self.remove_other_manage_channel_grants(after, owner_id)
 
     @commands.Cog.listener()
     async def on_guild_channel_delete(

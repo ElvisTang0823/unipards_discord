@@ -97,6 +97,20 @@ class TemporaryGroups(commands.Cog):
             )
             return
 
+        permissions_cog = self.bot.get_cog("ChannelPermissions")
+        enforce_permission_policy = getattr(
+            permissions_cog,
+            "enforce_channel_permission_policy",
+            None,
+        )
+        if not callable(enforce_permission_policy):
+            logger.error("Channel permission policy is unavailable")
+            await interaction.response.send_message(
+                "目前無法安全建立頻道，請通知管理員。",
+                ephemeral=True,
+            )
+            return
+
         channel_config = CHANNEL_TYPES[channel_type.value]
         category = interaction.guild.get_channel(channel_config["category_id"])
         if not isinstance(category, discord.CategoryChannel):
@@ -181,6 +195,29 @@ class TemporaryGroups(commands.Cog):
                 "無法保存建立者資料，因此未能保留此頻道。",
                 ephemeral=True,
             )
+            return
+
+        if not await enforce_permission_policy(channel, interaction.user.id):
+            try:
+                await channel.delete(reason="無法套用自動頻道權限安全政策")
+            except (discord.Forbidden, discord.HTTPException):
+                logger.exception(
+                    "Unable to delete generated channel %s after policy failure",
+                    channel.id,
+                )
+                failure_message = (
+                    "頻道權限安全設定失敗，且無法自動刪除頻道。"
+                    "請立即通知管理員檢查此頻道。"
+                )
+            else:
+                self.managed_channels.pop(channel.id, None)
+                if not await self.save_ownership():
+                    logger.error(
+                        "Unable to remove deleted channel %s from ownership storage",
+                        channel.id,
+                    )
+                failure_message = "無法套用頻道權限安全設定，因此已刪除此頻道。"
+            await interaction.followup.send(failure_message, ephemeral=True)
             return
 
         await send_permission_guide(channel)

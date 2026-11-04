@@ -147,6 +147,20 @@ class TempVoice(commands.Cog):
             )
             return
 
+        permissions_cog = self.bot.get_cog("ChannelPermissions")
+        enforce_permission_policy = getattr(
+            permissions_cog,
+            "enforce_channel_permission_policy",
+            None,
+        )
+        if not callable(enforce_permission_policy):
+            logger.error(
+                "Cannot create a temporary voice channel for member %s: "
+                "channel permission policy is unavailable",
+                member.id,
+            )
+            return
+
         existing_channel = self.find_owner_channel(member.guild, member.id)
         if existing_channel is not None:
             await self.ensure_owner_access(existing_channel, member)
@@ -228,6 +242,23 @@ class TempVoice(commands.Cog):
                 self.managed_channels.pop(channel.id, None)
             return
 
+        if not await enforce_permission_policy(channel, member.id):
+            try:
+                await channel.delete(reason="無法套用個人語音頻道權限安全政策")
+            except (discord.Forbidden, discord.HTTPException):
+                logger.exception(
+                    "Unable to delete voice channel %s after policy failure",
+                    channel.id,
+                )
+            else:
+                self.managed_channels.pop(channel.id, None)
+                if not await self.save_ownership():
+                    logger.error(
+                        "Unable to remove deleted voice channel %s from ownership storage",
+                        channel.id,
+                    )
+            return
+
         try:
             await member.move_to(channel, reason="進入新建立的個人語音頻道")
         except (discord.Forbidden, discord.HTTPException):
@@ -270,17 +301,22 @@ class TempVoice(commands.Cog):
                             channel.id,
                         )
                         continue
-                permissions_cog = self.bot.get_cog("ChannelPermissions")
-                prepare_overwrites = getattr(
-                    permissions_cog,
-                    "prepare_protected_overwrites",
-                    None,
-                )
-                if callable(prepare_overwrites):
-                    prepare_overwrites(channel, owner_id)
                 if owner is not None:
                     await self.ensure_owner_access(channel, owner)
                 await self.ensure_bot_access(channel)
+                permissions_cog = self.bot.get_cog("ChannelPermissions")
+                enforce_permission_policy = getattr(
+                    permissions_cog,
+                    "enforce_channel_permission_policy",
+                    None,
+                )
+                if callable(enforce_permission_policy):
+                    await enforce_permission_policy(channel, owner_id)
+                else:
+                    logger.error(
+                        "Cannot enforce permission policy for voice channel %s",
+                        channel.id,
+                    )
             elif channel is not None:
                 self.managed_channels.pop(channel_id, None)
                 await self.save_ownership()
