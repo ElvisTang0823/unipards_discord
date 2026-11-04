@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import discord
@@ -12,6 +13,8 @@ from cogs._config import required_snowflake
 UPDATE_OWNER_ID = required_snowflake("UPDATE_OWNER_ID")
 logger = logging.getLogger(__name__)
 MAX_MESSAGE_LENGTH = 2000
+DISCORD_OPERATION_TIMEOUT = 10
+WEBHOOK_CLEANUP_TIMEOUT = 5
 
 
 class MigrationDestinationSelect(discord.ui.ChannelSelect):
@@ -135,8 +138,11 @@ class MessageMigrationView(discord.ui.View):
         await interaction.response.defer(ephemeral=True, thinking=True)
         if interaction.message is not None:
             try:
-                await interaction.message.edit(view=self)
-            except discord.HTTPException:
+                await asyncio.wait_for(
+                    interaction.message.edit(view=self),
+                    timeout=WEBHOOK_CLEANUP_TIMEOUT,
+                )
+            except (asyncio.TimeoutError, discord.HTTPException):
                 logger.exception("Unable to disable message migration controls")
 
         _, response = await self.cog.migrate_message(
@@ -145,7 +151,16 @@ class MessageMigrationView(discord.ui.View):
             interaction.guild,
         )
         self.stop()
-        await interaction.followup.send(response, ephemeral=True)
+        try:
+            await asyncio.wait_for(
+                interaction.followup.send(response, ephemeral=True),
+                timeout=WEBHOOK_CLEANUP_TIMEOUT,
+            )
+        except (asyncio.TimeoutError, discord.HTTPException):
+            logger.exception(
+                "Unable to send migration result for source message %s",
+                self.source_message.id,
+            )
 
     @discord.ui.button(
         label="取消",
@@ -260,13 +275,12 @@ class MessageMigration(commands.Cog):
         if not (
             destination_permissions.view_channel
             and destination_permissions.send_messages
-            and destination_permissions.embed_links
             and destination_permissions.manage_webhooks
         ):
             return (
                 False,
-                "機器人在目的頻道需要「檢視頻道」、「傳送訊息」、"
-                "「嵌入連結」及「管理 Webhook」權限；原訊息未變更。",
+                "機器人在目的頻道需要「檢視頻道」、「傳送訊息」及"
+                "「管理 Webhook」權限；原訊息未變更。",
             )
 
         author_name = getattr(
@@ -274,30 +288,31 @@ class MessageMigration(commands.Cog):
             "display_name",
             source_message.author.name,
         )
-        attribution = discord.Embed(
-            title="訊息搬遷",
-            description=f"原作者：{author_name}\n來源頻道：{source_channel.mention}",
-            color=discord.Color.blurple(),
-        )
-        attribution.set_author(
-            name=f"原作者：{author_name}",
-            icon_url=source_message.author.display_avatar.url,
+        source_label = f"（搬遷自 #{source_channel.name[:30]}）"
+        migrated_username = (
+            f"{author_name[: max(1, 80 - len(source_label))]}{source_label}"
         )
 
         webhook: discord.Webhook | None = None
         sent_message: discord.WebhookMessage | None = None
         response = "搬遷失敗，原訊息已保留。"
         try:
-            webhook = await destination.create_webhook(
-                name="訊息搬遷",
-                reason=f"指定管理員 {UPDATE_OWNER_ID} 搬遷錯頻訊息",
+            webhook = await asyncio.wait_for(
+                destination.create_webhook(
+                    name="訊息搬遷",
+                    reason=f"指定管理員 {UPDATE_OWNER_ID} 搬遷錯頻訊息",
+                ),
+                timeout=DISCORD_OPERATION_TIMEOUT,
             )
-            sent_message = await webhook.send(
-                content=source_message.content,
-                embed=attribution,
-                username="訊息搬遷",
-                wait=True,
-                allowed_mentions=discord.AllowedMentions.none(),
+            sent_message = await asyncio.wait_for(
+                webhook.send(
+                    content=source_message.content,
+                    username=migrated_username[:80],
+                    avatar_url=source_message.author.display_avatar.url,
+                    wait=True,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                ),
+                timeout=DISCORD_OPERATION_TIMEOUT,
             )
             if (
                 sent_message is None
@@ -317,72 +332,155 @@ class MessageMigration(commands.Cog):
                 return False, response
 
             try:
-                await source_message.delete(
-                    reason=f"指定管理員 {UPDATE_OWNER_ID} 搬遷錯頻訊息"
+                await asyncio.wait_for(
+                    source_message.delete(
+                        reason=f"指定管理員 {UPDATE_OWNER_ID} 搬遷錯頻訊息"
+                    ),
+                    timeout=DISCORD_OPERATION_TIMEOUT,
                 )
             except discord.NotFound:
                 response = "訊息已搬遷；原訊息已不存在。"
                 return True, response
-            except (discord.Forbidden, discord.HTTPException):
+            except discord.Forbidden:
                 logger.exception(
                     "Unable to delete source message %s after migration",
                     source_message.id,
                 )
-                await self.rollback_destination_message(
-                    sent_message,
-                    source_message.id,
+                rollback_succeeded = await self.rollback_destination_message(
+                    sent_message, source_message.id
                 )
+                if not rollback_succeeded:
+                    return (
+                        False,
+                        "無法刪除原訊息，且未能撤回目的訊息；"
+                        "請立即人工檢查來源與目的頻道。",
+                    )
                 return (
                     False,
-                    "無法刪除來源訊息；原訊息已保留，並已嘗試撤回目的訊息。",
+                    "無法刪除來源訊息；原訊息已保留，目的訊息已撤回。",
+                )
+            except (asyncio.TimeoutError, discord.HTTPException):
+                logger.exception(
+                    "Unable to confirm deletion of source message %s",
+                    source_message.id,
+                )
+                source_still_exists = await self.source_message_exists(
+                    source_channel,
+                    source_message.id,
+                )
+                if source_still_exists is False:
+                    return True, "訊息已搬遷，原訊息已刪除。"
+                if source_still_exists is True:
+                    rollback_succeeded = await self.rollback_destination_message(
+                        sent_message, source_message.id
+                    )
+                    if rollback_succeeded:
+                        return (
+                            False,
+                            "無法刪除來源訊息；原訊息已保留，目的訊息已撤回。",
+                        )
+                    return (
+                        False,
+                        "無法刪除原訊息，且未能撤回目的訊息；"
+                        "請立即人工檢查來源與目的頻道。",
+                    )
+                return (
+                    False,
+                    "無法確認原訊息是否已刪除；為避免遺失，保留目的訊息。"
+                    "請檢查來源與目的頻道。",
                 )
 
             response = "訊息已搬遷，原訊息已刪除。"
             return True, response
-        except discord.Forbidden:
+        except (asyncio.TimeoutError, discord.Forbidden):
             logger.exception(
                 "Permission failure migrating message %s",
                 source_message.id,
             )
-            return False, "機器人權限不足，搬遷失敗；原訊息已保留。"
+            return False, "搬遷逾時或機器人權限不足；原訊息已保留。"
         except (discord.HTTPException, RuntimeError, TypeError):
             logger.exception(
                 "Unable to migrate source message %s",
                 source_message.id,
             )
             if sent_message is not None:
-                await self.rollback_destination_message(
-                    sent_message,
-                    source_message.id,
+                rollback_succeeded = await self.rollback_destination_message(
+                    sent_message, source_message.id
                 )
+                if not rollback_succeeded:
+                    return (
+                        False,
+                        "搬遷失敗且未能撤回目的訊息；原訊息仍保留，"
+                        "請立即人工檢查來源與目的頻道。",
+                    )
             return False, "搬遷發生錯誤，原訊息已保留。"
         finally:
             if webhook is not None:
                 try:
-                    await webhook.delete(reason="訊息搬遷完成")
+                    await asyncio.wait_for(
+                        webhook.delete(reason="訊息搬遷完成"),
+                        timeout=WEBHOOK_CLEANUP_TIMEOUT,
+                    )
                 except discord.NotFound:
                     pass
-                except (discord.Forbidden, discord.HTTPException):
+                except (
+                    asyncio.TimeoutError,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                ):
                     logger.exception(
                         "Unable to delete temporary migration webhook %s",
                         webhook.id,
                     )
 
     @staticmethod
+    async def source_message_exists(
+        channel: discord.TextChannel | discord.Thread,
+        message_id: int,
+    ) -> bool | None:
+        try:
+            await asyncio.wait_for(
+                channel.fetch_message(message_id),
+                timeout=WEBHOOK_CLEANUP_TIMEOUT,
+            )
+        except discord.NotFound:
+            return False
+        except (
+            asyncio.TimeoutError,
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
+            logger.exception(
+                "Unable to verify whether source message %s still exists",
+                message_id,
+            )
+            return None
+        return True
+
+    @staticmethod
     async def rollback_destination_message(
         message: discord.WebhookMessage,
         source_message_id: int,
-    ) -> None:
+    ) -> bool:
         try:
-            await message.delete(reason="訊息搬遷未完成，撤回目的訊息")
+            await asyncio.wait_for(
+                message.delete(reason="訊息搬遷未完成，撤回目的訊息"),
+                timeout=WEBHOOK_CLEANUP_TIMEOUT,
+            )
         except discord.NotFound:
-            pass
-        except (discord.Forbidden, discord.HTTPException):
+            return True
+        except (
+            asyncio.TimeoutError,
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
             logger.exception(
                 "Unable to roll back destination message %s for source %s",
                 message.id,
                 source_message_id,
             )
+            return False
+        return True
 
 
 async def setup(bot: commands.Bot) -> None:
