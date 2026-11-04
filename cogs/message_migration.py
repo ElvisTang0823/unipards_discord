@@ -32,7 +32,30 @@ class MigrationDestinationSelect(discord.ui.ChannelSelect):
             )
             return
 
-        destination = self.values[0]
+        selected_channel = self.values[0]
+        if (
+            interaction.guild is None
+            or selected_channel.guild_id != interaction.guild.id
+        ):
+            await interaction.response.send_message(
+                "目的頻道必須位於目前伺服器。",
+                ephemeral=True,
+            )
+            return
+        destination = selected_channel.resolve()
+        if destination is None:
+            try:
+                destination = await selected_channel.fetch()
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                logger.exception(
+                    "Unable to resolve selected migration destination %s",
+                    selected_channel.id,
+                )
+                await interaction.response.send_message(
+                    "無法讀取所選目的頻道，請重新選擇；原訊息未變更。",
+                    ephemeral=True,
+                )
+                return
         if not isinstance(destination, discord.TextChannel):
             await interaction.response.send_message(
                 "目的地必須是伺服器文字頻道。",
