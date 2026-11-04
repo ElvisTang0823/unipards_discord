@@ -691,11 +691,15 @@ class Signup(commands.Cog):
             SignupPanelView(self, event_id),
             message_id=panel_message.id,
         )
-        await interaction.followup.send(
-            f"已建立報名活動「{title_value}」：{panel_message.jump_url}。"
-            "建立者已自動列入報名。",
-            ephemeral=True,
-        )
+        try:
+            await interaction.delete_original_response()
+        except discord.NotFound:
+            pass
+        except (discord.Forbidden, discord.HTTPException):
+            logger.exception(
+                "Unable to remove private success response for signup event %s",
+                event_id,
+            )
 
     @staticmethod
     def create_signup_embed(

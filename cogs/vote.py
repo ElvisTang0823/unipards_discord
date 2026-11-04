@@ -714,10 +714,15 @@ class Vote(commands.Cog):
             return
 
         self.schedule_close(poll_id, utc_deadline)
-        await interaction.followup.send(
-            f"投票已建立：{poll_message.jump_url}",
-            ephemeral=True,
-        )
+        try:
+            await interaction.delete_original_response()
+        except discord.NotFound:
+            pass
+        except (discord.Forbidden, discord.HTTPException):
+            logger.exception(
+                "Unable to remove private success response for vote poll %s",
+                poll_id,
+            )
 
 
 async def setup(bot: commands.Bot) -> None:
