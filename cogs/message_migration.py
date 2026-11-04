@@ -135,22 +135,39 @@ class MessageMigrationView(discord.ui.View):
         button.disabled = True
         for item in self.children:
             item.disabled = True
-        await interaction.response.defer(ephemeral=True, thinking=True)
+        await interaction.response.edit_message(
+            content="正在搬遷訊息，請稍候；原訊息只會在搬遷成功後刪除。",
+            view=None,
+        )
+        self.stop()
+        try:
+            _, response = await self.cog.migrate_message(
+                self.source_message,
+                self.destination,
+                interaction.guild,
+            )
+        except Exception:
+            logger.exception(
+                "Unexpected error migrating source message %s",
+                self.source_message.id,
+            )
+            response = (
+                "搬遷流程發生未預期錯誤，請檢查機器人記錄及來源、目的頻道；"
+                "在確認原訊息狀態前，請勿重複搬遷。"
+            )
+
         if interaction.message is not None:
             try:
                 await asyncio.wait_for(
-                    interaction.message.edit(view=self),
+                    interaction.message.edit(content=response, view=None),
                     timeout=WEBHOOK_CLEANUP_TIMEOUT,
                 )
+                return
             except (asyncio.TimeoutError, discord.HTTPException):
-                logger.exception("Unable to disable message migration controls")
-
-        _, response = await self.cog.migrate_message(
-            self.source_message,
-            self.destination,
-            interaction.guild,
-        )
-        self.stop()
+                logger.exception(
+                    "Unable to update migration result for source message %s",
+                    self.source_message.id,
+                )
         try:
             await asyncio.wait_for(
                 interaction.followup.send(response, ephemeral=True),
@@ -158,7 +175,7 @@ class MessageMigrationView(discord.ui.View):
             )
         except (asyncio.TimeoutError, discord.HTTPException):
             logger.exception(
-                "Unable to send migration result for source message %s",
+                "Unable to report migration result for source message %s",
                 self.source_message.id,
             )
 
@@ -283,15 +300,30 @@ class MessageMigration(commands.Cog):
                 "「管理 Webhook」權限；原訊息未變更。",
             )
 
-        author_name = getattr(
-            source_message.author,
-            "display_name",
-            source_message.author.name,
-        )
-        source_label = f"（搬遷自 #{source_channel.name[:30]}）"
-        migrated_username = (
-            f"{author_name[: max(1, 80 - len(source_label))]}{source_label}"
-        )
+        author = source_message.author
+        if isinstance(author, discord.Member) and author.guild.id == guild.id:
+            author_member = author
+        else:
+            author_member = guild.get_member(author.id)
+            if author_member is None:
+                try:
+                    author_member = await asyncio.wait_for(
+                        guild.fetch_member(author.id),
+                        timeout=DISCORD_OPERATION_TIMEOUT,
+                    )
+                except (
+                    asyncio.TimeoutError,
+                    discord.Forbidden,
+                    discord.HTTPException,
+                ):
+                    logger.exception(
+                        "Unable to fetch guild member %s for message migration",
+                        author.id,
+                    )
+                    return (
+                        False,
+                        "無法取得原發言者在伺服器中的暱稱；原訊息未變更。",
+                    )
 
         webhook: discord.Webhook | None = None
         sent_message: discord.WebhookMessage | None = None
@@ -307,8 +339,8 @@ class MessageMigration(commands.Cog):
             sent_message = await asyncio.wait_for(
                 webhook.send(
                     content=source_message.content,
-                    username=migrated_username[:80],
-                    avatar_url=source_message.author.display_avatar.url,
+                    username=author_member.display_name[:80],
+                    avatar_url=author_member.display_avatar.url,
                     wait=True,
                     allowed_mentions=discord.AllowedMentions.none(),
                 ),
@@ -352,12 +384,14 @@ class MessageMigration(commands.Cog):
                 if not rollback_succeeded:
                     return (
                         False,
-                        "無法刪除原訊息，且未能撤回目的訊息；"
-                        "請立即人工檢查來源與目的頻道。",
+                        "機器人無法刪除原訊息，且未能撤回目的訊息；"
+                        "請確認來源頻道的「管理訊息」權限，並立即"
+                        "人工檢查來源與目的頻道。",
                     )
                 return (
                     False,
-                    "無法刪除來源訊息；原訊息已保留，目的訊息已撤回。",
+                    "機器人無法刪除來源訊息；原訊息已保留，目的訊息已撤回。"
+                    "請確認來源頻道的「管理訊息」權限。",
                 )
             except (asyncio.TimeoutError, discord.HTTPException):
                 logger.exception(
@@ -377,12 +411,14 @@ class MessageMigration(commands.Cog):
                     if rollback_succeeded:
                         return (
                             False,
-                            "無法刪除來源訊息；原訊息已保留，目的訊息已撤回。",
+                            "機器人無法刪除來源訊息；原訊息已保留，目的訊息已撤回。"
+                            "請確認來源頻道的「管理訊息」權限。",
                         )
                     return (
                         False,
-                        "無法刪除原訊息，且未能撤回目的訊息；"
-                        "請立即人工檢查來源與目的頻道。",
+                        "機器人無法刪除原訊息，且未能撤回目的訊息；"
+                        "請確認來源頻道的「管理訊息」權限，並立即"
+                        "人工檢查來源與目的頻道。",
                     )
                 return (
                     False,
