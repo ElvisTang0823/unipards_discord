@@ -18,6 +18,7 @@ UPDATE_OWNER_ID = required_snowflake("UPDATE_OWNER_ID")
 UPDATE_BRANCH = os.getenv("UPDATE_BRANCH", "master").strip()
 UPDATE_TIMEOUT_SECONDS = 600
 PROMPT_TIMEOUT_SECONDS = 900
+RESTART_PROMPT_TIMEOUT_SECONDS = 300
 logger = logging.getLogger(__name__)
 
 
@@ -179,7 +180,10 @@ class UpdateManager(commands.Cog):
                 return
 
         if not status.commits_behind and not self._dependencies_pending:
-            await ctx.send("目前已是最新版本，沒有待安裝的更新。")
+            await ctx.send(
+                "目前已是最新版本，沒有待安裝的更新。是否要重啟 Bot？",
+                view=RestartApprovalView(self),
+            )
             return
 
         try:
@@ -474,8 +478,11 @@ class UpdateApprovalView(discord.ui.View):
             await interaction.followup.send("目前已是最新版本，未執行更新。")
             return
 
-        await interaction.followup.send("更新完成，Bot 即將重新啟動。")
-        await self.manager.bot.close()
+        await interaction.followup.send(
+            "更新完成。請選擇是否立即重啟 Bot；若暫不重啟，"
+            "目前執行中的程序仍會使用舊版程式碼。",
+            view=RestartApprovalView(self.manager),
+        )
 
     @discord.ui.button(
         label="暫不更新",
@@ -520,6 +527,106 @@ class UpdateApprovalView(discord.ui.View):
                 logger.exception("Unable to mark expired update prompt")
         await self.manager.finish_prompt(self)
         self.manager.dismiss_commit(self.expected_commit)
+
+
+class RestartApprovalView(discord.ui.View):
+    def __init__(self, manager: UpdateManager) -> None:
+        super().__init__(timeout=RESTART_PROMPT_TIMEOUT_SECONDS)
+        self.manager = manager
+
+    def disable_buttons(self) -> None:
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != UPDATE_OWNER_ID:
+            await interaction.response.send_message(
+                "只有指定管理員可以選擇是否重啟 Bot。",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(
+        label="立即重啟",
+        style=discord.ButtonStyle.danger,
+    )
+    async def restart(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[RestartApprovalView],
+    ) -> None:
+        del button
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        self.disable_buttons()
+        if interaction.message is not None:
+            try:
+                await interaction.message.edit(
+                    content="已選擇重啟，Bot 即將重新啟動。",
+                    embed=None,
+                    view=self,
+                )
+            except discord.HTTPException:
+                logger.exception("Unable to update restart approval message")
+        try:
+            await interaction.followup.send(
+                "已收到重啟要求，Bot 即將重新啟動。",
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            logger.exception("Unable to acknowledge the restart request")
+        self.stop()
+        await self.manager.bot.close()
+
+    @discord.ui.button(
+        label="暫不重啟",
+        style=discord.ButtonStyle.secondary,
+    )
+    async def keep_running(
+        self,
+        interaction: discord.Interaction,
+        button: discord.ui.Button[RestartApprovalView],
+    ) -> None:
+        del button
+        self.disable_buttons()
+        try:
+            await interaction.response.edit_message(
+                content=(
+                    "Bot 將繼續執行目前版本；若剛完成程式更新，"
+                    "新版本會在下次重啟後生效。"
+                ),
+                embed=None,
+                view=self,
+            )
+        except discord.HTTPException:
+            logger.exception("Unable to update restart choice message")
+            if interaction.response.is_done():
+                await interaction.followup.send(
+                    "Bot 將繼續執行目前版本；新版本會在下次重啟後生效。",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_message(
+                    "Bot 將繼續執行目前版本；新版本會在下次重啟後生效。",
+                    ephemeral=True,
+                )
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        self.disable_buttons()
+        if self.message is not None:
+            try:
+                await self.message.edit(
+                    content=(
+                        "重啟選擇已逾時；Bot 維持執行中。"
+                        "若剛完成程式更新，新版本會在下次重啟後生效。"
+                    ),
+                    embed=None,
+                    view=self,
+                )
+            except discord.HTTPException:
+                logger.exception("Unable to mark expired restart prompt")
 
 
 async def setup(bot: commands.Bot) -> None:

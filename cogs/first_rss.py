@@ -10,9 +10,16 @@ from urllib.parse import urlparse
 
 import aiohttp
 import discord
+import psycopg
 from discord.ext import commands, tasks
 
 from cogs._config import required_snowflake
+from database import (
+    get_first_rss_items,
+    has_first_rss_history_scan,
+    save_first_rss_history,
+    save_first_rss_item,
+)
 
 RSS_URL = "https://community.firstinspires.org/topic/frc/rss.xml"
 TARGET_CHANNEL_ID = required_snowflake("RSS_CHANNEL_ID")
@@ -116,7 +123,6 @@ class FirstRss(commands.Cog):
         self.bot = bot
         self.published_guids: set[str] = set()
         self.published_links: set[str] = set()
-        self._channel_history_loaded = False
 
     async def cog_load(self) -> None:
         self.check_feed.start()
@@ -154,28 +160,72 @@ class FirstRss(commands.Cog):
             )
             return
 
-        history_limit = None if not self._channel_history_loaded else 100
+        if self.bot.database is None:
+            logger.error("Cannot check FIRST RSS without PostgreSQL")
+            return
+        try:
+            published_items = await get_first_rss_items(
+                self.bot.database,
+                [entry.guid for entry in entries],
+                [entry.link for entry in entries],
+            )
+            history_scan_completed = await has_first_rss_history_scan(
+                self.bot.database,
+                channel.id,
+            )
+        except (psycopg.Error, RuntimeError):
+            logger.exception("Unable to load FIRST RSS deduplication state")
+            return
+
+        self.published_guids.update(item["guid"] for item in published_items)
+        self.published_links.update(item["link"] for item in published_items)
+
+        history_limit = 100 if history_scan_completed else None
+        observed_items: list[tuple[str, str, int]] = []
+        observed_guids: set[str] = set()
+        observed_links: set[str] = set()
+        bot_user = self.bot.user
+        if bot_user is None:
+            logger.error("Cannot identify the Bot while scanning FIRST RSS history")
+            return
         try:
             async for message in channel.history(limit=history_limit):
+                if message.author.id != bot_user.id:
+                    continue
                 for embed in message.embeds:
                     footer_text = embed.footer.text or ""
-                    if footer_text.startswith(FOOTER_PREFIX):
-                        self.published_guids.add(
-                            footer_text[len(FOOTER_PREFIX):]
-                        )
-                    if (
-                        self.bot.user is not None
-                        and message.author.id == self.bot.user.id
-                        and embed.url is not None
-                    ):
-                        self.published_links.add(embed.url)
-        except (discord.Forbidden, discord.HTTPException):
+                    if not footer_text.startswith(FOOTER_PREFIX):
+                        continue
+                    guid = footer_text[len(FOOTER_PREFIX):]
+                    if not guid or embed.url is None:
+                        continue
+                    observed_guids.add(guid)
+                    observed_links.add(embed.url)
+                    observed_items.append((guid, embed.url, message.id))
+        except (
+            asyncio.TimeoutError,
+            discord.Forbidden,
+            discord.HTTPException,
+        ):
             logger.exception(
                 "Unable to read FIRST RSS channel history; "
                 "skipping this polling cycle"
             )
             return
-        self._channel_history_loaded = True
+
+        try:
+            await save_first_rss_history(
+                self.bot.database,
+                channel.id,
+                observed_items,
+                history_scan_completed=not history_scan_completed,
+            )
+        except (psycopg.Error, RuntimeError):
+            logger.exception("Unable to save FIRST RSS history")
+            return
+
+        self.published_guids.update(observed_guids)
+        self.published_links.update(observed_links)
 
         if channel.guild.get_role(TARGET_ROLE_ID) is None:
             logger.error(
@@ -210,7 +260,7 @@ class FirstRss(commands.Cog):
             embed.set_image(url=entry.image_url)
             embed.set_footer(text=f"{FOOTER_PREFIX}{entry.guid}")
             try:
-                await channel.send(
+                sent_message = await channel.send(
                     content=(
                         f":loudspeaker: FRC部落格更新囉！來看看最新的文章~ "
                         f"<@&{TARGET_ROLE_ID}>"
@@ -227,6 +277,20 @@ class FirstRss(commands.Cog):
 
             self.published_guids.add(entry.guid)
             self.published_links.add(entry.link)
+            try:
+                await save_first_rss_item(
+                    self.bot.database,
+                    entry.guid,
+                    entry.link,
+                    sent_message.id,
+                )
+            except (psycopg.Error, RuntimeError):
+                logger.exception(
+                    "Unable to persist FIRST RSS item with GUID %s",
+                    entry.guid,
+                )
+                return
+
             logger.info("Published FIRST RSS item with GUID %s", entry.guid)
 
     @check_feed.before_loop

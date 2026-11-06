@@ -97,7 +97,7 @@
 
 ### 本機核准更新與自動重啟
 
-Bot 每小時會從 `origin` 抓取 `.env` 中 `UPDATE_BRANCH` 指定的分支。發現新提交時，會私訊 `UPDATE_OWNER_ID` 顯示審核卡片；只有按下「確認更新」才會檢查工作目錄、以 fast-forward 方式更新程式、安裝 `requirements.txt` 並關閉 Bot。管理員也可私訊 Bot `!update` 立即檢查；這不會略過按鈕核准。拒絕或 15 分鐘內未審核都不會更新。有未提交的本機變更時會中止，不會 stash 或覆寫。
+Bot 每小時會從 `origin` 抓取 `.env` 中 `UPDATE_BRANCH` 指定的分支。發現新提交時，會私訊 `UPDATE_OWNER_ID` 顯示審核卡片；只有按下「確認更新」才會檢查工作目錄、以 fast-forward 方式更新程式並安裝 `requirements.txt`。更新完成後可選擇「立即重啟」或「暫不重啟」；已是最新版本時也可使用 `!update` 開啟重啟選項。管理員須以私訊 Bot `!update` 立即檢查；這不會略過更新核准。拒絕或 15 分鐘內未審核都不會更新。有未提交的本機變更時會中止，不會 stash 或覆寫。
 
 自動更新必須在真正的 Git clone 工作目錄執行；GitHub 的 **Download ZIP／分支壓縮檔不包含 `.git` 資料**，因此 Bot 無法讀取分支、執行 `git fetch` 或更新。ZIP 下載版本仍可手動啟動，但自動更新會停用，私訊 `!update` 會回報此原因。若要使用自動更新，請先停止舊 Bot，從 PowerShell 在要放置專案的目錄執行：
 
@@ -151,11 +151,11 @@ Remove-Item Env:BOT_COGS
 - `!rename <頻道名稱>`：由自動建立頻道的建立者變更頻道名稱；名稱長度需為 1 到 100 個字元。
 - `!close`：由建立者將活動討論群移至封存分類；封存後只有原本明確獲准檢視的對象可讀取歷史，且不可發言，Bot 會解除追蹤。臨時群組／個人語音頻道則會刪除。
 
-Bot 會每分鐘檢查 FIRST FRC Community RSS 的最新三則文章，並在頻道 `1555919971002089595` 發送尚未發布的卡片；訊息會顯示「FRC部落格更新囉！來看看最新的文章~」並提及身分組 `1555933526665334977`。卡片顯示文章標題、RSS 圖片與原文連結，使用 RSS GUID 去重，並以 Bot 已發送卡片的文章連結作為備援，顏色為 `#ED1C24`。此功能不使用資料庫；每次啟動會讀取該頻道訊息中的 RSS footer 與 Bot 卡片連結建立記憶體索引，再依最新三則文章補發缺少的項目。
+Bot 會每分鐘檢查 FIRST FRC Community RSS 的最新三則文章，並在頻道 `1555919971002089595` 發送尚未發布的卡片；訊息會顯示「FRC部落格更新囉！來看看最新的文章~」並提及身分組 `1555933526665334977`。卡片顯示文章標題、RSS 圖片與原文連結，並以 PostgreSQL 中的 RSS GUID 和文章連結去重。首次啟動會讀取完整頻道歷史並將已發卡片寫入資料庫；完成後每次檢查會核對最近 100 則訊息。歷史讀取逾時或資料庫無法使用時，該輪會略過發送，避免在無法確認去重狀態時重複發卡。卡片顏色為 `#ED1C24`。
 
 加入指定語音入口頻道（`1556272392458735668`）會自動建立個人語音頻道並將成員移入；頻道空置後會自動刪除。自動建頻的建立者資料存放於 `channel_owners` 資料表。
 
-啟動時會自動載入 `cogs/` 內的 Cog，並在專案內的 PostgreSQL 資料庫建立 `bot_settings`、`channel_owners`、`vote_polls`、`vote_ballots`、`signup_events`、`signup_members`、`order_events`、`order_participants` 與 `command_rate_limits` 資料表。
+啟動時會自動載入 `cogs/` 內的 Cog，並在專案內的 PostgreSQL 資料庫建立 `bot_settings`、`channel_owners`、`vote_polls`、`vote_ballots`、`signup_events`、`signup_members`、`order_events`、`order_participants`、`command_rate_limits`、`first_rss_items` 與 `first_rss_history_scans` 資料表。
 每位使用者（跨伺服器）的非建立指令共用「任一滾動 1 秒最多 2 次」限流；`/create-channel`、`/create-vote`、`/create-signup`、`/create-order` 共用每小時一次限流，且不另設伺服器活動上限。限制在 PostgreSQL 中原子記錄，可跨 Bot 重啟及多個 Bot 程序生效。資料庫操作使用最多 4 個背景工作者及有界佇列；佇列滿載時會拒絕新資料庫工作，不會無限制累積。此限制只約束指令執行，不限制按鈕、選單、表單、反應事件或到達 Discord／主機的網路流量，也不能取代 Discord 或主機商的 DDoS 防護。
 Slash Command 會在啟動時同步至 Discord；新增或修改指令後，請同步更新 `commands.json`。
 啟動時會重新同步目前載入的全域斜線指令定義，令 Discord 端與程式保持一致；並移除每個已加入伺服器內與目前全域指令同名的伺服器專屬指令，避免舊版本遮蔽新版。未載入的全域舊指令會由全域同步移除。

@@ -281,6 +281,20 @@ def _initialize_schema(connection: psycopg.Connection[Any]) -> None:
         )
         """,
         """
+        CREATE TABLE IF NOT EXISTS first_rss_items (
+            guid TEXT PRIMARY KEY,
+            link TEXT NOT NULL UNIQUE,
+            message_id BIGINT NOT NULL,
+            published_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS first_rss_history_scans (
+            channel_id BIGINT PRIMARY KEY,
+            completed_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        """
         CREATE INDEX IF NOT EXISTS idx_command_rate_limits_last_request
         ON command_rate_limits(last_request_at)
         """,
@@ -296,6 +310,87 @@ def _executemany(
 ) -> None:
     with connection.cursor() as cursor:
         cursor.executemany(query, parameters)
+
+
+@database_operation
+def get_first_rss_items(
+    connection: psycopg.Connection[Any],
+    guids: list[str],
+    links: list[str],
+) -> list[dict[str, Any]]:
+    if not guids:
+        return []
+    return list(
+        connection.execute(
+            """
+            SELECT guid, link
+            FROM first_rss_items
+            WHERE guid = ANY(%s) OR link = ANY(%s)
+            """,
+            (guids, links),
+        )
+    )
+
+
+@database_operation
+def has_first_rss_history_scan(
+    connection: psycopg.Connection[Any],
+    channel_id: int,
+) -> bool:
+    return (
+        connection.execute(
+            "SELECT 1 FROM first_rss_history_scans WHERE channel_id = %s",
+            (channel_id,),
+        ).fetchone()
+        is not None
+    )
+
+
+@database_operation
+def save_first_rss_history(
+    connection: psycopg.Connection[Any],
+    channel_id: int,
+    items: list[tuple[str, str, int]],
+    *,
+    history_scan_completed: bool,
+) -> None:
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """
+            INSERT INTO first_rss_items (guid, link, message_id)
+            VALUES (%s, %s, %s)
+            ON CONFLICT DO NOTHING
+            """,
+            items,
+        )
+    if history_scan_completed:
+        connection.execute(
+            """
+            INSERT INTO first_rss_history_scans (channel_id)
+            VALUES (%s)
+            ON CONFLICT (channel_id) DO NOTHING
+            """,
+            (channel_id,),
+        )
+    connection.commit()
+
+
+@database_operation
+def save_first_rss_item(
+    connection: psycopg.Connection[Any],
+    guid: str,
+    link: str,
+    message_id: int,
+) -> None:
+    connection.execute(
+        """
+        INSERT INTO first_rss_items (guid, link, message_id)
+        VALUES (%s, %s, %s)
+        ON CONFLICT DO NOTHING
+        """,
+        (guid, link, message_id),
+    )
+    connection.commit()
 
 
 async def initialize_database(database_url: str) -> Database:
