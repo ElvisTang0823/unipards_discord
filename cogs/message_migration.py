@@ -365,9 +365,7 @@ class MessageMigration(commands.Cog):
 
             try:
                 await asyncio.wait_for(
-                    source_message.delete(
-                        reason=f"指定管理員 {UPDATE_OWNER_ID} 搬遷錯頻訊息"
-                    ),
+                    source_message.delete(),
                     timeout=DISCORD_OPERATION_TIMEOUT,
                 )
             except discord.NotFound:
@@ -500,7 +498,7 @@ class MessageMigration(commands.Cog):
     ) -> bool:
         try:
             await asyncio.wait_for(
-                message.delete(reason="訊息搬遷未完成，撤回目的訊息"),
+                message.delete(),
                 timeout=WEBHOOK_CLEANUP_TIMEOUT,
             )
         except discord.NotFound:
