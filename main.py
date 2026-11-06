@@ -34,6 +34,7 @@ CREATE_COMMANDS = {
     "create-vote",
     "create-signup",
     "create-order",
+    "create-card",
 }
 
 load_dotenv(BASE_DIR / ".env")
