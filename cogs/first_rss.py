@@ -115,6 +115,7 @@ class FirstRss(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self.published_guids: set[str] = set()
+        self.published_links: set[str] = set()
         self._channel_history_loaded = False
 
     async def cog_load(self) -> None:
@@ -162,6 +163,12 @@ class FirstRss(commands.Cog):
                         self.published_guids.add(
                             footer_text[len(FOOTER_PREFIX):]
                         )
+                    if (
+                        self.bot.user is not None
+                        and message.author.id == self.bot.user.id
+                        and embed.url is not None
+                    ):
+                        self.published_links.add(embed.url)
         except (discord.Forbidden, discord.HTTPException):
             logger.exception(
                 "Unable to read FIRST RSS channel history; "
@@ -181,7 +188,10 @@ class FirstRss(commands.Cog):
         pending_entries = [
             entry
             for entry in entries
-            if entry.guid not in self.published_guids
+            if (
+                entry.guid not in self.published_guids
+                and entry.link not in self.published_links
+            )
         ]
         role = discord.Object(id=TARGET_ROLE_ID)
         allowed_mentions = discord.AllowedMentions(
@@ -216,6 +226,7 @@ class FirstRss(commands.Cog):
                 break
 
             self.published_guids.add(entry.guid)
+            self.published_links.add(entry.link)
             logger.info("Published FIRST RSS item with GUID %s", entry.guid)
 
     @check_feed.before_loop
