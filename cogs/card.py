@@ -1,5 +1,6 @@
 import logging
 import re
+from urllib.parse import urlsplit
 
 import discord
 from discord import app_commands
@@ -23,7 +24,8 @@ class CreateCard(commands.Cog):
     @app_commands.guild_only()
     @app_commands.describe(
         title="卡片標題（必填）",
-        body="卡片內文（選填）",
+        title_link="標題連結（選填，需為 HTTP 或 HTTPS 網址）",
+        body="卡片內文（選填），可以使用多行文字",
         footer="卡片頁尾（選填）",
         color="卡片邊框 HEX 顏色，例如 #5865F2",
         image="卡片圖片（選填）",
@@ -32,12 +34,14 @@ class CreateCard(commands.Cog):
         self,
         interaction: discord.Interaction,
         title: str,
+        title_link: str | None = None,
         body: str | None = None,
         footer: str | None = None,
         color: str = "#5865F2",
         image: discord.Attachment | None = None,
     ) -> None:
         title = normalize_multiline_text(title)
+        title_link = (title_link or "").strip()
         body = normalize_multiline_text(body or "")
         footer = normalize_multiline_text(footer or "")
         color = color.strip()
@@ -48,6 +52,24 @@ class CreateCard(commands.Cog):
                 ephemeral=True,
             )
             return
+        if title_link:
+            try:
+                parsed_title_link = urlsplit(title_link)
+                valid_title_link = (
+                    parsed_title_link.scheme in {"http", "https"}
+                    and parsed_title_link.hostname is not None
+                    and not any(character.isspace() for character in title_link)
+                    and len(title_link) <= 2048
+                )
+                _ = parsed_title_link.port
+            except ValueError:
+                valid_title_link = False
+            if not valid_title_link:
+                await interaction.response.send_message(
+                    "標題連結必須是有效的 HTTP 或 HTTPS 網址，且不可超過 2048 個字元。",
+                    ephemeral=True,
+                )
+                return
         if len(body) > 4096 or len(footer) > 2048:
             await interaction.response.send_message(
                 "卡片內文最多 4096 個字元，頁尾最多 2048 個字元。",
@@ -91,6 +113,7 @@ class CreateCard(commands.Cog):
         avatar_url = (user.avatar or user.default_avatar).url
         embed = discord.Embed(
             title=title,
+            url=title_link or None,
             description=body or None,
             color=discord.Color(int(color[1:], 16)),
         )
