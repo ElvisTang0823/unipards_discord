@@ -8,3 +8,4 @@ __pycache__/
 old_data/
 # Runtime database files, PostgreSQL data, and private backups
 data/
+gas/

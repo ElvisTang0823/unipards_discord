@@ -14,7 +14,8 @@ from discord import app_commands
 from discord.ext import commands, tasks
 from dotenv import load_dotenv
 
-from cogs._config import required_snowflake
+from cogs._config import required_bootstrap_owner_id, required_snowflake
+from cogs._gas_config import load_gas_config
 from database import (
     Database,
     DatabaseBusyError,
@@ -38,7 +39,8 @@ CREATE_COMMANDS = {
 }
 
 load_dotenv(BASE_DIR / ".env")
-UPDATE_OWNER_ID = required_snowflake("UPDATE_OWNER_ID")
+BOOTSTRAP_OWNER_ID = required_bootstrap_owner_id()
+UPDATE_OWNER_ID: int | None = None
 
 logger = logging.getLogger(__name__)
 
@@ -107,7 +109,11 @@ class RateLimitedCommandTree(app_commands.CommandTree):
             return False
 
         is_create = command.name in CREATE_COMMANDS
-        if is_create and interaction.user.id == UPDATE_OWNER_ID:
+        if (
+            is_create
+            and UPDATE_OWNER_ID is not None
+            and interaction.user.id == UPDATE_OWNER_ID
+        ):
             return True
 
         bucket = "create" if is_create else "commands"
@@ -155,9 +161,31 @@ class DiscordBot(commands.Bot):
         self._guild_command_cleanup_complete = False
         self._cog_test_mode = False
         self._registered_global_commands: set[str] = set()
+        self._gas_config_startup_error = False
+        self._gas_config_notification: str | None = None
+        self._gas_config_notification_attempted = False
         self.add_check(self._rate_limit_prefix_command)
 
     async def setup_hook(self) -> None:
+        global UPDATE_OWNER_ID
+
+        gas_config = await load_gas_config(BASE_DIR)
+        self._gas_config_notification = gas_config.notification
+        if gas_config.source == "unavailable":
+            self._gas_config_startup_error = True
+            logger.error("GAS settings unavailable; bot features will not load")
+            return
+        try:
+            UPDATE_OWNER_ID = required_snowflake("UPDATE_OWNER_ID")
+        except RuntimeError:
+            self._gas_config_startup_error = True
+            self._gas_config_notification = (
+                "GAS 設定缺少有效的 UPDATE_OWNER_ID，Bot 未載入功能。"
+                "請在試算表新增或修正該設定後重新啟動。"
+            )
+            logger.exception("GAS config does not contain a valid UPDATE_OWNER_ID")
+            return
+
         database, self.postgres_server = await initialize_bot_database()
         self.database = database
         await cleanup_command_rate_limits(database)
@@ -218,6 +246,26 @@ class DiscordBot(commands.Bot):
 
     async def on_ready(self) -> None:
         logger.info("Logged in as %s (ID: %s)", self.user, self.user.id)
+        if (
+            self._gas_config_notification
+            and not self._gas_config_notification_attempted
+        ):
+            self._gas_config_notification_attempted = True
+            try:
+                owner = self.get_user(BOOTSTRAP_OWNER_ID)
+                if owner is None:
+                    owner = await self.fetch_user(BOOTSTRAP_OWNER_ID)
+                await owner.send(self._gas_config_notification)
+            except (discord.Forbidden, discord.HTTPException):
+                logger.exception(
+                    "Unable to notify the update control administrator "
+                    "about GAS configuration"
+                )
+
+        if self._gas_config_startup_error:
+            await self.close()
+            return
+
         try:
             await self.change_presence(
                 activity=discord.Activity(

@@ -48,7 +48,7 @@
 
    若安裝指令失敗，先確認 `.venv\Scripts\python.exe --version` 顯示 `Python 3.14.8`，並確認安裝指令和啟動指令都使用同一個 `.venv\Scripts\python.exe`。不要用另一個終端機中的全域 `pip` 安裝後，期待虛擬環境能自動找到套件。
 
-3. 建立 `.env`，填入 Discord Bot Token、各項頻道／身分組 ID，以及更新管理員 ID：
+3. 建立 `.env`，填入 Discord Bot Token、GAS 部署網址，以及更新管理員 ID：
 
    如果你是從 GitHub 下載 ZIP／分支壓縮檔，`.env` 不會包含在下載內容中（它被 Git 忽略，用來避免提交 Token 和私有 ID）。請在專案根目錄執行以下指令建立自己的 `.env`：
 
@@ -57,22 +57,12 @@
    notepad .env
    ```
 
-   將範例值替換成你自己的 Discord Token 和 ID；所有必要 ID 都要填寫，逗號分隔的身分組 ID 也要填完整。`.env.example` 只是欄位範本，不能直接當作已設定好的 `.env` 使用。
+   將範例值替換成你自己的 Discord Token、GAS 網址與啟動通知用管理員 ID。`.env.example` 只是欄位範本，不能直接當作已設定好的 `.env` 使用。
 
    ```env
    DISCORD_TOKEN=你的BotToken
-   ARCHIVE_CATEGORY_ID=封存分類ID
-   PRIVATE_GROUP_CATEGORY_ID=私聊群分類ID
-   ACTIVITY_PROJECT_CATEGORY_ID=活動討論群分類ID
-   PROTECTED_ROLE_IDS=受保護身分組ID
-   RSS_CHANNEL_ID=RSS通知頻道ID
-   RSS_ROLE_ID=RSS通知身分組ID
-   ROLE_REQUEST_CHANNEL_ID=入群資料頻道ID
-   ROLE_REQUEST_NOTIFICATION_CHANNEL_ID=管理員通知頻道ID
-   ROLE_REQUEST_ADMIN_ROLE_IDS=管理員身分組ID,另一個管理員身分組ID
-   TEMP_CHANNEL_ENTRY_ID=臨時群組入口頻道ID
-   TEMP_VOICE_TRIGGER_CHANNEL_ID=臨時語音入口頻道ID
-   UPDATE_OWNER_ID=你的Discord使用者ID
+   GAS_CONFIG_URL=https://script.google.com/macros/s/你的部署ID/exec
+   GAS_BOOTSTRAP_OWNER_ID=啟動通知用Discord使用者ID
    UPDATE_BRANCH=master
    # Optional: use the hosting provider's PostgreSQL instead of embedded PostgreSQL.
    # DATABASE_URL=postgresql://USER:PASSWORD@HOST:PORT/DATABASE
@@ -80,7 +70,30 @@
 
    `pip install -r requirements.txt` 會安裝 Psycopg 用戶端與 `pgembed` PostgreSQL Server。未設定 `DATABASE_URL` 時，Bot 會在專案內的 `data/postgres/` 啟動 PostgreSQL 並初始化 schema，不需要預先安裝資料庫或設定連接埠。若託管平台提供 PostgreSQL，請在 `.env` 或平台環境變數設定 `DATABASE_URL`，Bot 會改連該資料庫並初始化所需 schema，不啟動內嵌 PostgreSQL。請勿將含密碼的連線字串提交到版本控制。原 SQLite 資料庫已備份到 `data/backups/bot.sqlite3`，不會匯入新資料庫。
 
-   `.env` 已加入 Git 忽略清單；請只在本機填入實際 ID 與憑證。Bot 僅支援 Python 3.14.8，啟動時會檢查版本。
+   #### Google 試算表與 GAS 設定
+
+   1. 建立或開啟一份 Google 試算表，進入 **擴充功能 → Apps Script**，將專案中的 [`gas/Code.gs`](./gas/Code.gs) 貼入並儲存。
+   2. 在 Apps Script 編輯器選取並執行一次 `setupConfigSheet`，授權後會建立 `BotConfig` 工作表及標題列。工作表使用兩欄，第一列必須是 `key`、`value`；每個設定一列。以下是目前 Bot 使用的設定範例，可依需求新增其他變數列：
+
+      | key | value |
+      | --- | --- |
+      | ARCHIVE_CATEGORY_ID | 封存分類 ID |
+      | PRIVATE_GROUP_CATEGORY_ID | 私聊群分類 ID |
+      | ACTIVITY_PROJECT_CATEGORY_ID | 活動討論群分類 ID |
+      | RSS_CHANNEL_ID | RSS 通知頻道 ID |
+      | RSS_ROLE_ID | RSS 通知身分組 ID |
+      | ROLE_REQUEST_CHANNEL_ID | 入群資料頻道 ID |
+      | ROLE_REQUEST_NOTIFICATION_CHANNEL_ID | 管理員通知頻道 ID |
+      | TEMP_CHANNEL_ENTRY_ID | 臨時群組入口頻道 ID |
+      | TEMP_VOICE_TRIGGER_CHANNEL_ID | 臨時語音入口頻道 ID |
+      | UPDATE_OWNER_ID | 更新管理員 Discord 使用者 ID |
+
+      請將 `value` 欄設為**純文字**，避免試算表將 Discord ID 當數字轉換。GAS 會動態讀取所有設定列，不會限定設定名稱：任何一列的 `value` 含逗號時，都會拆成 JSON 字串陣列；沒有逗號時則輸出單一字串。例如 `RSS_CHANNEL_ID` 的值 `123,456` 會成為 `{"RSS_CHANNEL_ID":["123","456"]}`。新增變數列後，Bot 程式應透過 `get_gas_config("變數名稱")` 從 GAS JSON 設定讀取，**不得改從 `.env` 或 `os.getenv` 讀取功能所需的 ID／設定**；刪除不再使用的列也不需修改 GAS。
+   3. 在 Apps Script 選取 **部署 → 新增部署 → 網頁應用程式**，執行身分選「我」，存取權選「所有人」，部署後複製以 `/exec` 結尾的網址填入 `.env` 的 `GAS_CONFIG_URL`。這是公開端點；任何取得網址的人都能讀取 JSON 中的 Discord ID，請勿在試算表放 Token、密碼或其他機密。
+
+   Bot 每次啟動都會先向 GAS 取得並驗證所有設定列，成功後寫入 `data/gas_config.json` 作為上次成功快取。GAS 暫時無法連線或回傳無效資料時，會沿用有效快取並私訊 `.env` 的 `GAS_BOOTSTRAP_OWNER_ID`；若從未成功取得設定且沒有有效快取，Bot 不會載入功能，並會嘗試用該聯絡 ID 通知後停止。`GAS_BOOTSTRAP_OWNER_ID` 僅供啟動通知；所有功能使用的 Discord ID（包括管理員 `UPDATE_OWNER_ID`）必須從 GAS JSON 設定讀取，不得依賴舊 `.env` ID。身分組通知只提及 `UPDATE_OWNER_ID`，且只有該使用者對通知按下 ✅ 才會標記完成，不需設定管理員身分組 ID。新增欄位可供新功能使用；但目前 Bot 功能仍需要上表中已使用的設定，若刪除仍被功能讀取的欄位，需同步停用或修改該功能。請勿在公開 GAS 試算表中放置 Token、密碼或其他機密。
+
+   `.env` 已加入 Git 忽略清單；請只在本機填入實際憑證與管理員 ID。Bot 僅支援 Python 3.14.8，啟動時會檢查版本。
 
    `data/` 已加入 `.gitignore`，包含 PostgreSQL 資料與舊資料備份，不會隨原始碼提交。打包或複製資料前請先完整停止 Bot；PostgreSQL 原生資料目錄只能在相容作業系統／架構及相同 PostgreSQL 主要版本間直接搬移，跨平台需用 `pg_dump`／還原。線上託管只有在主機提供持久化磁碟，且支援該平台的 `pgembed` wheel 時才適合此模式；暫存磁碟可能在重新部署時清空資料。
 

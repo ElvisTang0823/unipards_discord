@@ -7,6 +7,8 @@
 - Use `database.py` for embedded PostgreSQL schema and persistence helpers. The PostgreSQL 17 data directory is `data/postgres/`; `bot.database` is the async `Database` pool facade. Do not issue feature queries directly through the pool.
 - Before changing database schemas or persisted data, check compatibility with existing databases and plan idempotent migrations or data transfers that preserve existing records; avoid conflicting schema changes or startup failures that could disconnect the bot, and validate upgrades against existing data.
 - Keep `commands.json` synchronized with user-facing prefix and slash commands.
+- Store Discord IDs and other runtime feature settings in the dynamic GAS JSON configuration (`BotConfig` key/value rows), not in `.env` or direct `os.getenv` lookups. Read them through `get_gas_config` or the validated helpers in `cogs/_config.py`; add new settings as GAS sheet rows and do not hardcode a fixed key allowlist in the GAS script or loader.
+- `GAS_BOOTSTRAP_OWNER_ID` is the sole ID exception: it remains in `.env` only as the bootstrap contact for startup notifications when GAS configuration is unavailable. The feature/admin `UPDATE_OWNER_ID` must come from GAS JSON like every other feature ID.
 
 ## Code Style
 

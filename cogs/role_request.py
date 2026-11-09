@@ -8,14 +8,13 @@ from pathlib import Path
 import discord
 from discord.ext import commands
 
-from cogs._config import required_snowflake, required_snowflake_list
+from cogs._config import required_snowflake
 
 REQUEST_CHANNEL_ID = required_snowflake("ROLE_REQUEST_CHANNEL_ID")
 UPDATE_OWNER_ID = required_snowflake("UPDATE_OWNER_ID")
 ADMIN_NOTIFICATION_CHANNEL_ID = required_snowflake(
     "ROLE_REQUEST_NOTIFICATION_CHANNEL_ID"
 )
-ADMIN_ROLE_IDS = required_snowflake_list("ROLE_REQUEST_ADMIN_ROLE_IDS")
 ROLE_REQUEST_CARD_FOOTER = "- FRC6998入群資料註冊面板"
 ROLE_NOTIFICATION_PENDING_FOOTER = "unipards:role-notification:v1:pending"
 logger = logging.getLogger(__name__)
@@ -266,6 +265,7 @@ class RoleRequest(commands.Cog):
             or str(payload.emoji) != "✅"
             or self.bot.user is None
             or payload.user_id == self.bot.user.id
+            or payload.user_id != UPDATE_OWNER_ID
         ):
             return
 
@@ -277,15 +277,6 @@ class RoleRequest(commands.Cog):
 
             guild = message.guild
             if guild is None:
-                return
-            member = payload.member or guild.get_member(payload.user_id)
-            if member is None:
-                member = await guild.fetch_member(payload.user_id)
-            if not any(role.id in ADMIN_ROLE_IDS for role in member.roles):
-                logger.info(
-                    "Ignoring completion reaction from user %s without an admin role",
-                    payload.user_id,
-                )
                 return
 
             notification_embed = next(
