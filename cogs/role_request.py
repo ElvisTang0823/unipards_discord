@@ -15,7 +15,7 @@ UPDATE_OWNER_ID = required_snowflake("UPDATE_OWNER_ID")
 ADMIN_NOTIFICATION_CHANNEL_ID = required_snowflake(
     "ROLE_REQUEST_NOTIFICATION_CHANNEL_ID"
 )
-ROLE_REQUEST_CARD_FOOTER = "- FRC6998入群資料註冊面板"
+ROLE_REQUEST_CARD_FOOTER = "UNIPARDS_ROLE_REQUEST_PANEL"
 ROLE_NOTIFICATION_PENDING_FOOTER = "unipards:role-notification:v1:pending"
 logger = logging.getLogger(__name__)
 

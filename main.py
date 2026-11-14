@@ -221,6 +221,10 @@ class DiscordBot(commands.Bot):
                     + ", ".join(unknown_cogs)
                 )
 
+        if "role_request" in cogs_to_load and "notify_role" in cogs_to_load:
+            cogs_to_load.remove("role_request")
+            cogs_to_load.insert(cogs_to_load.index("notify_role"), "role_request")
+
         for cog_name in cogs_to_load:
             await self.load_extension(f"cogs.{cog_name}")
             logger.info("Loaded cog: %s", cog_name)
