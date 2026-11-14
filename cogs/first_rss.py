@@ -13,7 +13,7 @@ import discord
 import psycopg
 from discord.ext import commands, tasks
 
-from cogs._config import required_snowflake
+from cogs._config import required_snowflake, required_snowflake_list
 from database import (
     get_first_rss_items,
     has_first_rss_history_scan,
@@ -22,8 +22,11 @@ from database import (
 )
 
 RSS_URL = "https://community.firstinspires.org/topic/frc/rss.xml"
-TARGET_CHANNEL_ID = required_snowflake("RSS_CHANNEL_ID")
-TARGET_ROLE_ID = required_snowflake("RSS_ROLE_ID")
+TARGET_CHANNEL_ID = required_snowflake("NOTIFY_CHANNEL_ID")
+NOTIFY_ROLE_IDS = required_snowflake_list("NOTIFY_ROLE_ID")
+if len(NOTIFY_ROLE_IDS) < 2:
+    raise RuntimeError("NOTIFY_ROLE_ID must contain at least two Discord role IDs")
+TARGET_ROLE_ID = NOTIFY_ROLE_IDS[1]
 POLL_INTERVAL_SECONDS = 60
 MAX_FEED_BYTES = 2 * 1024 * 1024
 FOOTER_PREFIX = "FIRST RSS ID: "

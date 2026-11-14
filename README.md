@@ -80,8 +80,7 @@
       | ARCHIVE_CATEGORY_ID | 封存分類 ID |
       | PRIVATE_GROUP_CATEGORY_ID | 私聊群分類 ID |
       | ACTIVITY_PROJECT_CATEGORY_ID | 活動討論群分類 ID |
-      | RSS_CHANNEL_ID | RSS 通知頻道 ID |
-      | RSS_ROLE_ID | RSS 通知身分組 ID |
+      | NOTIFY_CHANNEL_ID | 推播通知頻道 ID |
       | ROLE_REQUEST_CHANNEL_ID | 入群資料頻道 ID |
       | ROLE_REQUEST_NOTIFICATION_CHANNEL_ID | 管理員通知頻道 ID |
       | NOTIFY_ROLE_ID | 推播身分組 ID 陣列（依 TeamUpdate、FRCblog、TBA、Bot 更新排序） |
