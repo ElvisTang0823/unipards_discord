@@ -84,11 +84,13 @@
       | RSS_ROLE_ID | RSS 通知身分組 ID |
       | ROLE_REQUEST_CHANNEL_ID | 入群資料頻道 ID |
       | ROLE_REQUEST_NOTIFICATION_CHANNEL_ID | 管理員通知頻道 ID |
+      | NOTIFY_ROLE_ID | 推播身分組 ID 陣列（依 TeamUpdate、FRCblog、TBA、Bot 更新排序） |
+      | NOTIFY_ROLE_EMOJI_ID | 推播面板自訂表情 ID 陣列（依 TU、FB、TBA、BOT 排序） |
       | TEMP_CHANNEL_ENTRY_ID | 臨時群組入口頻道 ID |
       | TEMP_VOICE_TRIGGER_CHANNEL_ID | 臨時語音入口頻道 ID |
       | UPDATE_OWNER_ID | 更新管理員 Discord 使用者 ID |
 
-      請將 `value` 欄設為**純文字**，避免試算表將 Discord ID 當數字轉換。GAS 會動態讀取所有設定列，不會限定設定名稱：任何一列的 `value` 含逗號時，都會拆成 JSON 字串陣列；沒有逗號時則輸出單一字串。例如 `RSS_CHANNEL_ID` 的值 `123,456` 會成為 `{"RSS_CHANNEL_ID":["123","456"]}`。新增變數列後，Bot 程式應透過 `get_gas_config("變數名稱")` 從 GAS JSON 設定讀取，**不得改從 `.env` 或 `os.getenv` 讀取功能所需的 ID／設定**；刪除不再使用的列也不需修改 GAS。
+      請將 `value` 欄設為**純文字**，避免試算表將 Discord ID 當數字轉換。推播面板需將 `NOTIFY_ROLE_ID` 與 `NOTIFY_ROLE_EMOJI_ID` 設為各含四個逗號分隔值的陣列，依表格順序一一對應；表情 ID 依序對應 TU、FB、TBA、BOT 自訂表情。GAS 會動態讀取所有設定列，不會限定設定名稱：任何一列的 `value` 含逗號時，都會拆成 JSON 字串陣列；沒有逗號時則輸出單一字串。例如 `RSS_CHANNEL_ID` 的值 `123,456` 會成為 `{"RSS_CHANNEL_ID":["123","456"]}`。新增變數列後，Bot 程式應透過 `get_gas_config("變數名稱")` 從 GAS JSON 設定讀取，**不得改從 `.env` 或 `os.getenv` 讀取功能所需的 ID／設定**；刪除不再使用的列也不需修改 GAS。
    3. 在 Apps Script 選取 **部署 → 新增部署 → 網頁應用程式**，執行身分選「我」，存取權選「所有人」，部署後複製以 `/exec` 結尾的網址填入 `.env` 的 `GAS_CONFIG_URL`。這是公開端點；任何取得網址的人都能讀取 JSON 中的 Discord ID，請勿在試算表放 Token、密碼或其他機密。
 
    Bot 每次啟動都會先向 GAS 取得並驗證所有設定列，成功後寫入 `data/gas_config.json` 作為上次成功快取。GAS 暫時無法連線或回傳無效資料時，會沿用有效快取並私訊 `.env` 的 `GAS_BOOTSTRAP_OWNER_ID`；若從未成功取得設定且沒有有效快取，Bot 不會載入功能，並會嘗試用該聯絡 ID 通知後停止。`GAS_BOOTSTRAP_OWNER_ID` 僅供啟動通知；所有功能使用的 Discord ID（包括管理員 `UPDATE_OWNER_ID`）必須從 GAS JSON 設定讀取，不得依賴舊 `.env` ID。身分組通知只提及 `UPDATE_OWNER_ID`，且只有該使用者對通知按下 ✅ 才會標記完成，不需設定管理員身分組 ID。新增欄位可供新功能使用；但目前 Bot 功能仍需要上表中已使用的設定，若刪除仍被功能讀取的欄位，需同步停用或修改該功能。請勿在公開 GAS 試算表中放置 Token、密碼或其他機密。
