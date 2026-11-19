@@ -258,7 +258,7 @@ class FirstRss(commands.Cog):
             embed = discord.Embed(
                 title=entry.title,
                 url=entry.link,
-                color=discord.Color(0xED1C24),
+                color=discord.Color(0xbe95b1),
             )
             embed.set_image(url=entry.image_url)
             embed.set_footer(text=f"{FOOTER_PREFIX}{entry.guid}")

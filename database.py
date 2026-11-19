@@ -295,6 +295,14 @@ def _initialize_schema(connection: psycopg.Connection[Any]) -> None:
         )
         """,
         """
+        CREATE TABLE IF NOT EXISTS team_update_items (
+            link TEXT PRIMARY KEY,
+            update_number INTEGER NOT NULL,
+            message_id BIGINT,
+            recorded_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+        """,
+        """
         CREATE INDEX IF NOT EXISTS idx_command_rate_limits_last_request
         ON command_rate_limits(last_request_at)
         """,
@@ -390,6 +398,35 @@ def save_first_rss_item(
         """,
         (guid, link, message_id),
     )
+    connection.commit()
+
+
+@database_operation
+def get_team_update_links(
+    connection: psycopg.Connection[Any],
+) -> set[str]:
+    return {
+        row["link"]
+        for row in connection.execute("SELECT link FROM team_update_items")
+    }
+
+
+@database_operation
+def save_team_update_items(
+    connection: psycopg.Connection[Any],
+    items: list[tuple[str, int, int | None]],
+) -> None:
+    if not items:
+        return
+    with connection.cursor() as cursor:
+        cursor.executemany(
+            """
+            INSERT INTO team_update_items (link, update_number, message_id)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (link) DO NOTHING
+            """,
+            items,
+        )
     connection.commit()
 
 
