@@ -5,7 +5,7 @@ import psycopg
 import discord
 from discord.ext import commands
 
-from cogs.channel_permissions import send_permission_guide
+from cogs.channels.channel_permissions import send_permission_guide
 from cogs._config import required_snowflake
 from database import Database, load_channel_owners, save_channel_owners
 

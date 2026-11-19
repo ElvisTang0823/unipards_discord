@@ -13,7 +13,7 @@ from discord.ext import commands, tasks
 from cogs._config import required_snowflake
 
 
-BASE_DIR = Path(__file__).resolve().parents[1]
+BASE_DIR = Path(__file__).resolve().parents[2]
 UPDATE_OWNER_ID = required_snowflake("UPDATE_OWNER_ID")
 UPDATE_BRANCH = os.getenv("UPDATE_BRANCH", "master").strip()
 UPDATE_TIMEOUT_SECONDS = 600

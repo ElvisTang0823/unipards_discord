@@ -12,7 +12,7 @@ from cogs._pagination import (
     PrivateEmbedPaginator,
 )
 
-COMMANDS_PATH = Path(__file__).resolve().parent.parent / "commands.json"
+COMMANDS_PATH = Path(__file__).resolve().parents[2] / "commands.json"
 MAX_EMBED_DESCRIPTION_LENGTH = 700
 logger = logging.getLogger(__name__)
 

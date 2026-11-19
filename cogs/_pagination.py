@@ -207,7 +207,7 @@ class PersistentPageButton(
             return []
 
         if self.source == "info":
-            from cogs.info import Info
+            from cogs.general.info import Info
 
             cog = bot.get_cog("Info")
             return (
@@ -220,7 +220,7 @@ class PersistentPageButton(
             )
 
         if self.source == "signup":
-            from cogs.signup import Signup
+            from cogs.creates.signup import Signup
 
             cog = bot.get_cog("Signup")
             if not isinstance(cog, Signup):
@@ -230,7 +230,7 @@ class PersistentPageButton(
                 interaction.guild_id,
             )
 
-        from cogs.order import Order
+        from cogs.creates.order import Order
 
         cog = bot.get_cog("Order")
         if not isinstance(cog, Order):

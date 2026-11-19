@@ -19,7 +19,7 @@ ROLE_REQUEST_CARD_FOOTER = "UNIPARDS_ROLE_REQUEST_PANEL"
 ROLE_NOTIFICATION_PENDING_FOOTER = "unipards:role-notification:v1:pending"
 logger = logging.getLogger(__name__)
 
-RULES_FILE = Path(__file__).resolve().parent.parent / "rules.json"
+RULES_FILE = Path(__file__).resolve().parents[2] / "rules.json"
 rules_data = json.loads(RULES_FILE.read_text(encoding="utf-8"))
 if (
     not isinstance(rules_data, dict)

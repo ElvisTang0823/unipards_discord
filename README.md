@@ -1,6 +1,6 @@
 # Unipards Discord Bot
 
-以 Python 建立的 Discord Bot 起始專案。指令功能放在 `cogs/`，預設使用 `pgembed` 在專案內啟動 PostgreSQL 17；也可透過 `DATABASE_URL` 連線到託管 PostgreSQL。
+以 Python 建立的 Discord Bot 起始專案。Cog 依功能分類放在 `cogs/` 子資料夾，啟動時會遞迴載入；共用設定與 UI helper 留在 `cogs/` 根目錄。分類為 `creates/`（建立卡片、投票、報名與揪團）、`notifies/`（通知與 RSS）、`channels/`（頻道）、`roles/`（身分組）、`admin/`（管理工具）及 `general/`（一般工具）。預設使用 `pgembed` 在專案內啟動 PostgreSQL 17；也可透過 `DATABASE_URL` 連線到託管 PostgreSQL。
 
 ## 環境需求
 
@@ -143,7 +143,7 @@ $env:BOT_COGS = ""
 .\.venv\Scripts\python.exe main.py
 ```
 
-可用空格或逗號指定多個 Cog，例如 `$env:BOT_COGS = "vote info"`。隔離模式只載入並同步所選 Cog 的全域斜線指令，並移除伺服器中與這些指令同名的伺服器專屬版本。請使用獨立的測試 Bot Token；此模式會更新該 Bot Application 的全域斜線指令，Discord 顯示新指令可能需要一些時間。
+可用空格或逗號指定多個 Cog，例如 `$env:BOT_COGS = "vote info"`。名稱仍使用 Cog 檔名（不含 `.py`），不需要加上分類資料夾。隔離模式只載入並同步所選 Cog 的全域斜線指令，並移除伺服器中與這些指令同名的伺服器專屬版本。請使用獨立的測試 Bot Token；此模式會更新該 Bot Application 的全域斜線指令，Discord 顯示新指令可能需要一些時間。
 若要單獨測試表符報名，請改用 `$env:BOT_COGS = "signup"`。
 若要單獨測試揪團，請使用 `$env:BOT_COGS = "order"`。
 

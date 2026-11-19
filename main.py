@@ -191,12 +191,15 @@ class DiscordBot(commands.Bot):
         await cleanup_command_rate_limits(database)
         self.cleanup_rate_limits.start()
 
-        available_cogs = {
-            cog_file.stem
-            for cog_file in COGS_DIR.glob("*.py")
+        cog_modules = {
+            cog_file.stem: ".".join(
+                cog_file.relative_to(BASE_DIR).with_suffix("").parts
+            )
+            for cog_file in COGS_DIR.rglob("*.py")
             if cog_file.name != "__init__.py"
             and not cog_file.name.startswith("_")
         }
+        available_cogs = set(cog_modules)
         configured_cogs = os.getenv("BOT_COGS")
         if configured_cogs is None:
             cogs_to_load = sorted(available_cogs)
@@ -226,7 +229,7 @@ class DiscordBot(commands.Bot):
             cogs_to_load.insert(cogs_to_load.index("notify_role"), "role_request")
 
         for cog_name in cogs_to_load:
-            await self.load_extension(f"cogs.{cog_name}")
+            await self.load_extension(cog_modules[cog_name])
             logger.info("Loaded cog: %s", cog_name)
 
         self._registered_global_commands = {

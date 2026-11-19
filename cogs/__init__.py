@@ -1,0 +1,1 @@
+"""Discord bot cogs and shared cog support modules."""
