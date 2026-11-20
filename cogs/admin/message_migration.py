@@ -297,13 +297,11 @@ class MessageMigration(commands.Cog):
         if not source_permissions.manage_messages:
             return False, "機器人在來源頻道缺少「管理訊息」權限；原訊息未變更。"
 
-        webhook_channel: (
-            discord.TextChannel | discord.NewsChannel | discord.ForumChannel
-        )
+        webhook_channel: discord.TextChannel | discord.ForumChannel
         if isinstance(destination, discord.Thread):
             if not isinstance(
                 destination.parent,
-                (discord.TextChannel, discord.NewsChannel, discord.ForumChannel),
+                (discord.TextChannel, discord.ForumChannel),
             ):
                 return (
                     False,
@@ -321,7 +319,17 @@ class MessageMigration(commands.Cog):
             webhook_channel = destination
 
         webhook_channel_permissions = webhook_channel.permissions_for(bot_member)
-        if not (
+        if isinstance(destination, discord.Thread):
+            if not (
+                webhook_channel_permissions.view_channel
+                and webhook_channel_permissions.manage_webhooks
+            ):
+                return (
+                    False,
+                    "機器人在目的討論串的父頻道需要「檢視頻道」及"
+                    "「管理 Webhook」權限；原訊息未變更。",
+                )
+        elif not (
             webhook_channel_permissions.view_channel
             and webhook_channel_permissions.send_messages
             and webhook_channel_permissions.manage_webhooks
@@ -381,10 +389,13 @@ class MessageMigration(commands.Cog):
                 webhook.send(**send_kwargs),
                 timeout=DISCORD_OPERATION_TIMEOUT,
             )
+            destination_channel_ids = {destination.id}
+            if isinstance(destination, discord.Thread) and destination.parent is not None:
+                destination_channel_ids.add(destination.parent.id)
             if (
                 sent_message is None
                 or sent_message.content != source_message.content
-                or sent_message.channel.id != destination.id
+                or sent_message.channel.id not in destination_channel_ids
             ):
                 logger.error(
                     "Message migration verification failed for source message %s",
