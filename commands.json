@@ -13,7 +13,7 @@
     {
       "name": "/sys-home",
       "usage": "/sys-home",
-      "description": "透過 Discord Activity 開啟雲豹的窩網站。"
+      "description": "從 Discord 文字頻道或私訊直接啟動雲豹的窩 Activity。"
     },
     {
       "name": "/create-channel",
