@@ -11,6 +11,11 @@
       "description": "以私人回覆分頁查看指令清單，或輸入單一指令名稱查詢其用法與說明。"
     },
     {
+      "name": "/sys-home",
+      "usage": "/sys-home",
+      "description": "透過 Discord Activity 開啟雲豹的窩網站。"
+    },
+    {
       "name": "/create-channel",
       "usage": "/create-channel <頻道類型> [頻道名稱]",
       "description": "在機器人儀錶板頻道建立私聊群或活動討論群。"
