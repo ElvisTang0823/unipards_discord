@@ -20,8 +20,14 @@ WEBHOOK_CLEANUP_TIMEOUT = 5
 class MigrationDestinationSelect(discord.ui.ChannelSelect):
     def __init__(self) -> None:
         super().__init__(
-            channel_types=[discord.ChannelType.text],
-            placeholder="選擇搬遷目的文字頻道",
+            channel_types=[
+                discord.ChannelType.text,
+                discord.ChannelType.news,
+                discord.ChannelType.public_thread,
+                discord.ChannelType.private_thread,
+                discord.ChannelType.news_thread,
+            ],
+            placeholder="選擇搬遷目的文字頻道或討論串",
             min_values=1,
             max_values=1,
         )
@@ -59,15 +65,15 @@ class MigrationDestinationSelect(discord.ui.ChannelSelect):
                     ephemeral=True,
                 )
                 return
-        if not isinstance(destination, discord.TextChannel):
+        if not isinstance(destination, (discord.TextChannel, discord.Thread)):
             await interaction.response.send_message(
-                "目的地必須是伺服器文字頻道。",
+                "目的地必須是伺服器文字頻道或討論串。",
                 ephemeral=True,
             )
             return
         if destination.id == view.source_message.channel.id:
             await interaction.response.send_message(
-                "目的頻道不能與原訊息所在頻道相同。",
+                "目的地不能與原訊息所在頻道或討論串相同。",
                 ephemeral=True,
             )
             return
@@ -76,7 +82,7 @@ class MigrationDestinationSelect(discord.ui.ChannelSelect):
         view.confirm_button.disabled = False
         await interaction.response.edit_message(
             content=(
-                f"目的頻道：{destination.mention}\n"
+                f"目的地：{destination.mention}\n"
                 "只會搬遷訊息文字；附件、表情反應、回覆關係及其他內容不會搬遷。"
                 "確認後，原訊息會在搬遷成功時刪除。"
             ),
@@ -93,7 +99,7 @@ class MessageMigrationView(discord.ui.View):
         super().__init__(timeout=300)
         self.cog = cog
         self.source_message = source_message
-        self.destination: discord.TextChannel | None = None
+        self.destination: discord.TextChannel | discord.Thread | None = None
         self.confirm_button.disabled = True
         self.add_item(MigrationDestinationSelect())
 
@@ -252,7 +258,8 @@ class MessageMigration(commands.Cog):
             return
 
         await interaction.response.send_message(
-            "選擇目的文字頻道後，確認即可搬遷。只有搬遷成功才會刪除原訊息。",
+            "選擇目的文字頻道或討論串後，確認即可搬遷。"
+            "只有搬遷成功才會刪除原訊息。",
             view=MessageMigrationView(self, message),
             ephemeral=True,
         )
@@ -260,7 +267,7 @@ class MessageMigration(commands.Cog):
     async def migrate_message(
         self,
         source_message: discord.Message,
-        destination: discord.TextChannel,
+        destination: discord.TextChannel | discord.Thread,
         guild: discord.Guild,
     ) -> tuple[bool, str]:
         source_channel = source_message.channel
@@ -269,6 +276,7 @@ class MessageMigration(commands.Cog):
             or source_message.guild.id != guild.id
             or destination.guild.id != guild.id
             or destination.id == source_channel.id
+            or not isinstance(destination, (discord.TextChannel, discord.Thread))
             or not isinstance(
                 source_channel,
                 (discord.TextChannel, discord.Thread),
@@ -286,17 +294,41 @@ class MessageMigration(commands.Cog):
             return False, "無法確認機器人權限；原訊息未變更。"
 
         source_permissions = source_channel.permissions_for(bot_member)
-        destination_permissions = destination.permissions_for(bot_member)
         if not source_permissions.manage_messages:
             return False, "機器人在來源頻道缺少「管理訊息」權限；原訊息未變更。"
+
+        webhook_channel: (
+            discord.TextChannel | discord.NewsChannel | discord.ForumChannel
+        )
+        if isinstance(destination, discord.Thread):
+            if not isinstance(
+                destination.parent,
+                (discord.TextChannel, discord.NewsChannel, discord.ForumChannel),
+            ):
+                return (
+                    False,
+                    "目前僅支援文字、公告或論壇頻道中的討論串；原訊息未變更。",
+                )
+            webhook_channel = destination.parent
+            destination_permissions = destination.permissions_for(bot_member)
+            if not destination_permissions.send_messages_in_threads:
+                return (
+                    False,
+                    "機器人在目的討論串缺少「在討論串中傳送訊息」權限；"
+                    "原訊息未變更。",
+                )
+        else:
+            webhook_channel = destination
+
+        webhook_channel_permissions = webhook_channel.permissions_for(bot_member)
         if not (
-            destination_permissions.view_channel
-            and destination_permissions.send_messages
-            and destination_permissions.manage_webhooks
+            webhook_channel_permissions.view_channel
+            and webhook_channel_permissions.send_messages
+            and webhook_channel_permissions.manage_webhooks
         ):
             return (
                 False,
-                "機器人在目的頻道需要「檢視頻道」、「傳送訊息」及"
+                "機器人在目的文字頻道需要「檢視頻道」、「傳送訊息」及"
                 "「管理 Webhook」權限；原訊息未變更。",
             )
 
@@ -330,20 +362,23 @@ class MessageMigration(commands.Cog):
         response = "搬遷失敗，原訊息已保留。"
         try:
             webhook = await asyncio.wait_for(
-                destination.create_webhook(
+                webhook_channel.create_webhook(
                     name="訊息搬遷",
                     reason=f"指定管理員 {UPDATE_OWNER_ID} 搬遷錯頻訊息",
                 ),
                 timeout=DISCORD_OPERATION_TIMEOUT,
             )
+            send_kwargs: dict[str, object] = {
+                "content": source_message.content,
+                "username": author_member.display_name[:80],
+                "avatar_url": author_member.display_avatar.url,
+                "wait": True,
+                "allowed_mentions": discord.AllowedMentions.none(),
+            }
+            if isinstance(destination, discord.Thread):
+                send_kwargs["thread"] = destination
             sent_message = await asyncio.wait_for(
-                webhook.send(
-                    content=source_message.content,
-                    username=author_member.display_name[:80],
-                    avatar_url=author_member.display_avatar.url,
-                    wait=True,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                ),
+                webhook.send(**send_kwargs),
                 timeout=DISCORD_OPERATION_TIMEOUT,
             )
             if (
